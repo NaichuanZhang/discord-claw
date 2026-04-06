@@ -21,8 +21,8 @@ const client = new Anthropic({
 // ---------------------------------------------------------------------------
 
 const DEFAULT_MODEL = "bedrock-claude-opus-4-6-1m";
-const MAX_TOKENS = 4096;
-const MAX_TOOL_TURNS = 10;
+const MAX_TOKENS = 16384;
+const MAX_CONSECUTIVE_DUPES = 2; // Break loop after this many identical consecutive tool calls
 
 /** Strip ANSI escape artifacts from env values (e.g. trailing [1m] from shell). */
 function cleanModelName(s: string): string {
@@ -160,7 +160,7 @@ async function executeTool(
   }
 
   // Discord tools are async
-  if (name === "send_message" || name === "add_reaction" || name === "get_channel_history") {
+  if (name === "send_message" || name === "send_file" || name === "add_reaction" || name === "get_channel_history") {
     return await handleDiscordTool(name, input);
   }
 
@@ -207,7 +207,11 @@ export async function processMessage(opts: {
   const collectedText: string[] = [];
   let turns = 0;
 
-  while (turns < MAX_TOOL_TURNS) {
+  // Duplicate tool call detection — track previous turn's calls
+  let prevCallSignatures: string[] = [];
+  let consecutiveDupes = 0;
+
+  while (true) {
     turns++;
 
     const response = await client.messages.create({
@@ -227,6 +231,55 @@ export async function processMessage(opts: {
 
     // If the model didn't ask to use a tool, we're done
     if (response.stop_reason !== "tool_use") {
+      break;
+    }
+
+    // Build signatures for this turn's tool calls
+    const currentSignatures: string[] = [];
+    for (const block of response.content) {
+      if (block.type === "tool_use") {
+        currentSignatures.push(`${block.name}:${JSON.stringify(block.input)}`);
+      }
+    }
+
+    // Check for duplicate calls (same tools+args as previous turn)
+    const isDuplicate =
+      currentSignatures.length > 0 &&
+      currentSignatures.length === prevCallSignatures.length &&
+      currentSignatures.every((sig, i) => sig === prevCallSignatures[i]);
+
+    if (isDuplicate) {
+      consecutiveDupes++;
+      console.log(
+        `[agent] Duplicate tool call detected (${consecutiveDupes}/${MAX_CONSECUTIVE_DUPES})`,
+      );
+    } else {
+      consecutiveDupes = 0;
+    }
+    prevCallSignatures = currentSignatures;
+
+    // If we've hit the dupe limit, force the model to stop looping
+    if (consecutiveDupes >= MAX_CONSECUTIVE_DUPES) {
+      console.log("[agent] Breaking loop — repeated duplicate tool calls");
+      // Give the model one last chance with a nudge instead of tools
+      messages.push({ role: "assistant", content: response.content });
+      messages.push({
+        role: "user",
+        content:
+          "[System: You have called the same tools with identical inputs multiple times. Stop calling tools and produce your final response now using the information you already have.]",
+      });
+      // One final turn without tools to force a text response
+      const final = await client.messages.create({
+        model: getModel(),
+        max_tokens: MAX_TOKENS,
+        system: systemPrompt,
+        messages,
+      });
+      for (const block of final.content) {
+        if (block.type === "text") {
+          collectedText.push(block.text);
+        }
+      }
       break;
     }
 
@@ -291,8 +344,10 @@ export async function processAgentTurn(opts: {
 
   const collectedText: string[] = [];
   let turns = 0;
+  let prevCallSignatures: string[] = [];
+  let consecutiveDupes = 0;
 
-  while (turns < MAX_TOOL_TURNS) {
+  while (true) {
     turns++;
 
     const response = await client.messages.create({
@@ -310,6 +365,49 @@ export async function processAgentTurn(opts: {
     }
 
     if (response.stop_reason !== "tool_use") {
+      break;
+    }
+
+    // Duplicate detection
+    const currentSignatures: string[] = [];
+    for (const block of response.content) {
+      if (block.type === "tool_use") {
+        currentSignatures.push(`${block.name}:${JSON.stringify(block.input)}`);
+      }
+    }
+
+    const isDuplicate =
+      currentSignatures.length > 0 &&
+      currentSignatures.length === prevCallSignatures.length &&
+      currentSignatures.every((sig, i) => sig === prevCallSignatures[i]);
+
+    if (isDuplicate) {
+      consecutiveDupes++;
+      console.log(`[agent] Cron duplicate tool call (${consecutiveDupes}/${MAX_CONSECUTIVE_DUPES})`);
+    } else {
+      consecutiveDupes = 0;
+    }
+    prevCallSignatures = currentSignatures;
+
+    if (consecutiveDupes >= MAX_CONSECUTIVE_DUPES) {
+      console.log("[agent] Cron loop broken — repeated duplicate tool calls");
+      messages.push({ role: "assistant", content: response.content });
+      messages.push({
+        role: "user",
+        content:
+          "[System: You have called the same tools with identical inputs multiple times. Stop calling tools and produce your final response now.]",
+      });
+      const final = await client.messages.create({
+        model: getModel(opts.model),
+        max_tokens: MAX_TOKENS,
+        system: systemPrompt,
+        messages,
+      });
+      for (const block of final.content) {
+        if (block.type === "text") {
+          collectedText.push(block.text);
+        }
+      }
       break;
     }
 

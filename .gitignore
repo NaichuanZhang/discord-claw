@@ -1,6 +1,11 @@
 node_modules/
 dist/
 data/discordclaw.db
+data/discordclaw.db-shm
+data/discordclaw.db-wal
 data/cron/runs/
+data/skills/
+data/serve/
 .env
 reference/
+.claude-design/

@@ -58,7 +58,7 @@ graph TB
     PM --> TL
     TL <-->|messages + tools| CLAUDE
     TL -->|memory_search, memory_get| MEM
-    TL -->|send_message, add_reaction| CL
+    TL -->|send_message, send_file, add_reaction| CL
     MH -->|log| DB
     MH -->|broadcast| WS
     MEM --> DB
@@ -100,7 +100,7 @@ sequenceDiagram
     A->>A: Build system prompt (soul + memory instructions + channel config)
     A->>C: messages.create(system, messages, tools)
 
-    loop Tool Use Loop (max 10 turns)
+    loop Tool Use Loop (with duplicate detection)
         C-->>A: tool_use: memory_search
         A->>M: searchMemory(query)
         M->>DB: FTS5 MATCH query
@@ -186,15 +186,15 @@ graph LR
 ```
 discordclaw/
 ├── src/
-│   ├── index.ts              # Entry point: start all systems
+│   ├── index.ts              # Entry point: start all systems, kill stale instances on restart
 │   ├── bot/                   # Discord bot (discord.js v14)
 │   │   ├── client.ts          # Client setup, intents, event routing, DM raw fallback
-│   │   ├── messages.ts        # Message pipeline: filter → session → agent → reply
+│   │   ├── messages.ts        # Message pipeline: filter → session → agent → reply (persistent typing indicator)
 │   │   ├── commands.ts        # Slash commands: /help /config /sessions /forget /soul
 │   │   └── components.ts      # Button/select interaction handler
 │   ├── agent/                 # Claude integration
-│   │   ├── agent.ts           # Anthropic SDK wrapper, system prompt, tool loop
-│   │   ├── tools.ts           # Discord tools (send_message, add_reaction, get_history)
+│   │   ├── agent.ts           # Anthropic SDK wrapper, system prompt, tool loop with duplicate detection
+│   │   ├── tools.ts           # Discord tools (send_message, send_file, add_reaction, get_history)
 │   │   ├── dangerous-tools.ts # Powerful tools: bash, read_file, write_file
 │   │   └── sessions.ts        # Per-thread/DM session tracking + TTL
 │   ├── skills/                # Skills management (SDK pattern)
@@ -205,7 +205,7 @@ discordclaw/
 │   ├── soul/
 │   │   └── soul.ts            # Load SOUL.md, file watcher, hot-reload
 │   ├── memory/
-│   │   ├── memory.ts          # File discovery, FTS5 indexing, BM25 search
+│   │   ├── memory.ts          # File discovery, FTS5 indexing, BM25 search, query sanitization
 │   │   └── tools.ts           # memory_search + memory_get tool definitions
 │   ├── cron/
 │   │   ├── types.ts           # Job, schedule, payload, delivery types
@@ -243,7 +243,7 @@ discordclaw/
    - **Message Content Intent** (required)
    - **Server Members Intent** (recommended)
 5. Go to **OAuth2 > URL Generator**, select scopes: `bot`, `applications.commands`
-6. Select permissions: Send Messages, Read Message History, Add Reactions, Use Slash Commands
+6. Select permissions: Send Messages, Read Message History, Add Reactions, Use Slash Commands, Attach Files
 7. Use the generated URL to invite the bot to your server
 
 ### Install & Run
@@ -283,7 +283,7 @@ The bot responds to **@mentions** in guild channels and all **DMs**. Dashboard a
 
 **Soul** — Bot personality defined in `data/SOUL.md`. Hot-reloads on file change. Editable via dashboard.
 
-**Memory** — Markdown files in `data/` indexed with SQLite FTS5. The agent searches memory before answering questions about past context. BM25 ranked results.
+**Memory** — Markdown files in `data/` indexed with SQLite FTS5. The agent searches memory before answering questions about past context. BM25 ranked results. Queries are sanitized for FTS5 special characters.
 
 **Sessions** — Per-thread/DM/channel conversation tracking. History loaded as context for each message. Auto-expires after TTL.
 
@@ -292,3 +292,13 @@ The bot responds to **@mentions** in guild channels and all **DMs**. Dashboard a
 **Skills** — Modular capabilities defined as SKILL.md files with YAML frontmatter. Install from GitHub URL or upload directly. Uses SDK progressive loading pattern: only skill metadata (name, description, path) is injected into the system prompt; the agent reads full skill content on demand via `read_skill` tool. Skills can include companion files (scripts, references). Manageable via dashboard.
 
 **Dashboard** — Single-page React app at `http://localhost:3000`. Status, session browser, channel config, soul/memory editor, cron manager, skills manager, real-time message logs via WebSocket.
+
+## Agent Behavior
+
+**Tool Loop** — The agent runs tool calls in a loop until it produces a text response. Instead of a fixed turn limit, it uses **duplicate detection**: if the same tool is called with identical arguments for 2 consecutive turns, the loop breaks and the agent is forced to produce a final text response.
+
+**Typing Indicator** — The bot sends a typing indicator every 8 seconds while processing, so Discord shows "Bot is typing..." for the full duration of long agent turns.
+
+**File Sending** — The agent can send files (PDFs, images, HTML, etc.) as Discord attachments via the `send_file` tool, with automatic file size validation (25 MB limit).
+
+**Restart Safety** — On restart, the process kills any stale instances of itself to prevent duplicate bots from running simultaneously.

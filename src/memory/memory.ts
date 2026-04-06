@@ -198,11 +198,25 @@ function startWatcher(): void {
 // Search (BM25 via FTS5)
 // ---------------------------------------------------------------------------
 
+/**
+ * Sanitize a query string for FTS5 MATCH.
+ * FTS5 treats hyphens, colons, etc. as operators — wrap each token in quotes
+ * so they're treated as literal terms.
+ */
+function sanitizeFts5Query(raw: string): string {
+  // Split on whitespace, wrap each token in double quotes (escape internal quotes)
+  const tokens = raw.trim().split(/\s+/).filter(Boolean);
+  if (tokens.length === 0) return '""';
+  return tokens.map((t) => `"${t.replace(/"/g, '""')}"`).join(" ");
+}
+
 export function searchMemory(
   query: string,
   maxResults: number = 5
 ): MemorySearchResult[] {
   const db = getDb();
+
+  const safeQuery = sanitizeFts5Query(query);
 
   const rows = db
     .prepare(
@@ -212,7 +226,7 @@ export function searchMemory(
        ORDER BY rank
        LIMIT ?`
     )
-    .all(query, maxResults) as Array<{
+    .all(safeQuery, maxResults) as Array<{
       path: string;
       chunk_text: string;
       start_line: number;

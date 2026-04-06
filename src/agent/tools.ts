@@ -2,6 +2,9 @@
 // Discord tool definitions for the Anthropic Messages API
 // ---------------------------------------------------------------------------
 
+import { existsSync, statSync } from "fs";
+import { basename } from "path";
+
 export const discordTools = [
   {
     name: "send_message",
@@ -13,6 +16,33 @@ export const discordTools = [
         text: { type: "string", description: "Message text to send" },
       },
       required: ["channel_id", "text"],
+    },
+  },
+  {
+    name: "send_file",
+    description:
+      "Send a file (attachment) to a Discord channel. Optionally include a text message alongside the file. Use this to share PDFs, images, HTML files, or any other file from disk.",
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        channel_id: { type: "string", description: "Discord channel ID" },
+        file_path: {
+          type: "string",
+          description:
+            "Absolute path to the file on disk to send as an attachment",
+        },
+        message: {
+          type: "string",
+          description:
+            "Optional text message to include with the file attachment",
+        },
+        filename: {
+          type: "string",
+          description:
+            "Optional custom filename for the attachment (defaults to the original filename)",
+        },
+      },
+      required: ["channel_id", "file_path"],
     },
   },
   {
@@ -66,6 +96,13 @@ export function setDiscordClient(client: any): void {
 }
 
 // ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
+
+/** Discord's max file upload size for bots (default tier: 25 MB). */
+const MAX_FILE_SIZE_BYTES = 25 * 1024 * 1024;
+
+// ---------------------------------------------------------------------------
 // Tool handler
 // ---------------------------------------------------------------------------
 
@@ -94,6 +131,64 @@ export async function handleDiscordTool(
           success: true,
           message_id: sent.id,
           channel_id: channelId,
+        });
+      }
+
+      case "send_file": {
+        const channelId = input.channel_id as string;
+        const filePath = input.file_path as string;
+        const message = (input.message as string) || undefined;
+        const customFilename = (input.filename as string) || undefined;
+
+        console.log(
+          `[agent] send_file -> channel ${channelId}, file ${filePath}`,
+        );
+
+        // Validate the file exists
+        if (!existsSync(filePath)) {
+          return JSON.stringify({
+            error: `File not found: ${filePath}`,
+          });
+        }
+
+        // Check file size
+        const stats = statSync(filePath);
+        if (stats.size > MAX_FILE_SIZE_BYTES) {
+          return JSON.stringify({
+            error: `File too large (${(stats.size / 1024 / 1024).toFixed(1)} MB). Discord limit is 25 MB.`,
+          });
+        }
+
+        const channel: any = await discordClient.channels.fetch(channelId);
+        if (!channel || !channel.send) {
+          return JSON.stringify({
+            error: `Channel ${channelId} not found or not a text channel`,
+          });
+        }
+
+        const attachment: { attachment: string; name?: string } = {
+          attachment: filePath,
+        };
+        if (customFilename) {
+          attachment.name = customFilename;
+        }
+
+        const sendPayload: { files: typeof attachment[]; content?: string } = {
+          files: [attachment],
+        };
+        if (message) {
+          sendPayload.content = message;
+        }
+
+        const sent = await channel.send(sendPayload);
+        const sentAttachment = sent.attachments?.first();
+
+        return JSON.stringify({
+          success: true,
+          message_id: sent.id,
+          channel_id: channelId,
+          filename: sentAttachment?.name ?? customFilename ?? basename(filePath),
+          size_bytes: stats.size,
         });
       }
 

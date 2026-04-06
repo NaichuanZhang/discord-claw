@@ -1,6 +1,6 @@
 import "dotenv/config";
 
-import { spawn } from "node:child_process";
+import { execSync, spawn } from "node:child_process";
 import { initDb } from "./db/index.js";
 import { initSoul, stopSoulWatcher } from "./soul/soul.js";
 import { initMemory, stopMemoryWatcher } from "./memory/memory.js";
@@ -17,8 +17,41 @@ import { setRestartHandler } from "./restart.js";
 // Startup
 // ---------------------------------------------------------------------------
 
+function killExistingInstances(): void {
+  const myPid = process.pid;
+  try {
+    // Find all node processes running discordclaw's index
+    const out = execSync(
+      `ps aux | grep -E 'tsx.*src/index\\.ts|node.*dist/index\\.js' | grep -v grep`,
+      { encoding: "utf-8", timeout: 5_000 },
+    ).trim();
+
+    if (!out) return;
+
+    for (const line of out.split("\n")) {
+      const parts = line.trim().split(/\s+/);
+      const pid = parseInt(parts[1], 10);
+      if (!pid || pid === myPid) continue;
+      try {
+        process.kill(pid, "SIGTERM");
+        console.log(`[discordclaw] Killed existing instance (PID ${pid})`);
+      } catch {
+        // Process may have already exited
+      }
+    }
+  } catch {
+    // grep returns exit code 1 when no matches — that's fine
+  }
+}
+
 async function main(): Promise<void> {
   console.log("[discordclaw] Starting...");
+
+  // 0. Kill any existing discordclaw instances (only on restart, not manual start)
+  if (process.env.DISCORDCLAW_RESTART === "1") {
+    killExistingInstances();
+    delete process.env.DISCORDCLAW_RESTART;
+  }
 
   // 1. Initialize database
   console.log("[discordclaw] Initializing database...");
@@ -141,7 +174,7 @@ async function main(): Promise<void> {
       const child = spawn(
         process.execPath,
         [...process.execArgv, ...process.argv.slice(1)],
-        { detached: true, stdio: "inherit", env: process.env },
+        { detached: true, stdio: "inherit", env: { ...process.env, DISCORDCLAW_RESTART: "1" } },
       );
       child.unref();
       process.exit(0);

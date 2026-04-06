@@ -110,14 +110,23 @@ export async function handleMessage(message: DiscordMessage): Promise<void> {
     ? message.channel.name
     : "DM";
 
-  // 6. Show typing indicator
-  try {
-    if ("sendTyping" in message.channel) {
-      await message.channel.sendTyping();
+  // 6. Show typing indicator — refresh every 8s (Discord typing expires after ~10s)
+  let typingInterval: ReturnType<typeof setInterval> | null = null;
+  const startTyping = () => {
+    if (!("sendTyping" in message.channel)) return;
+    message.channel.sendTyping().catch(() => {});
+    typingInterval = setInterval(() => {
+      (message.channel as { sendTyping: () => Promise<void> }).sendTyping().catch(() => {});
+    }, 8_000);
+  };
+  const stopTyping = () => {
+    if (typingInterval) {
+      clearInterval(typingInterval);
+      typingInterval = null;
     }
-  } catch {
-    // Non-critical — continue even if typing fails
-  }
+  };
+
+  startTyping();
 
   try {
     // 7. Agent dispatch
@@ -133,6 +142,8 @@ export async function handleMessage(message: DiscordMessage): Promise<void> {
       history,
       channelConfig,
     });
+
+    stopTyping();
 
     // 8. Log both messages to DB
     addMessage({
@@ -184,6 +195,7 @@ export async function handleMessage(message: DiscordMessage): Promise<void> {
       `[bot] Replied to ${message.author.tag} in ${channelName} (session ${session.id})`,
     );
   } catch (err) {
+    stopTyping();
     console.error("[bot] Error processing message:", err);
     try {
       await message.reply(
