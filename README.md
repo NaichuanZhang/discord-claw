@@ -29,6 +29,7 @@ graph TB
             MEM[Memory System<br/>FTS5 Search]
             SESS[Session Manager]
             CRON[Cron Service]
+            EVO[Evolution Engine<br/>Self-Modification]
         end
 
         subgraph Storage
@@ -59,6 +60,9 @@ graph TB
     TL <-->|messages + tools| CLAUDE
     TL -->|memory_search, memory_get| MEM
     TL -->|send_message, send_file, add_reaction| CL
+    TL -->|evolve_start, evolve_write, evolve_propose| EVO
+    EVO -->|git worktree, gh pr create| GH[GitHub]
+    EVO --> DB
     MH -->|log| DB
     MH -->|broadcast| WS
     MEM --> DB
@@ -177,11 +181,51 @@ graph LR
     UI -->|GET/PUT /api/soul| API
     UI -->|GET/PUT /api/memory| API
     UI -->|CRUD /api/cron| API
+    UI -->|GET /api/evolutions| API
     UI <-->|real-time logs| WS
 
     API --> DB
     API --> FS
     API --> CRON
+```
+
+### Evolution Flow
+
+```mermaid
+sequenceDiagram
+    participant U as Discord User
+    participant A as Agent
+    participant E as Evolution Engine
+    participant W as beta/ Worktree
+    participant GH as GitHub
+    participant O as Owner
+
+    U->>A: "Add feature X"
+    A->>E: evolve_start(reason)
+    E->>W: git worktree add beta/
+    E->>W: symlink node_modules
+    E-->>A: evolution ID + branch
+
+    loop Make Changes
+        A->>W: evolve_write(path, content)
+        A->>W: evolve_read(path)
+        A->>W: evolve_bash(command)
+    end
+
+    A->>E: evolve_propose(summary)
+    E->>W: npm run typecheck
+    E->>W: git add + commit
+    E->>GH: git push + gh pr create
+    E->>E: git worktree remove beta/
+    E-->>A: PR URL
+
+    A->>U: "PR created: github.com/.../pull/N"
+
+    O->>GH: Review & merge PR
+    Note over GH,E: On next /restart
+    E->>E: start.sh: git pull → migrate → build → start
+    E->>E: syncDeployedEvolutions()
+    E->>E: Health check ✓ (or auto-rollback)
 ```
 
 ## Project Structure
@@ -215,21 +259,29 @@ discordclaw/
 │   │   ├── types.ts           # Job, schedule, payload, delivery types
 │   │   ├── store.ts           # JSON persistence + JSONL run history
 │   │   └── service.ts         # Timer loop, execution, retry, auto-disable
+│   ├── evolution/             # Self-evolution system
+│   │   ├── engine.ts          # Git worktree lifecycle, PR creation via gh CLI
+│   │   ├── log.ts             # Evolution SQLite table + CRUD
+│   │   ├── tools.ts           # Agent tools: evolve_start/read/write/bash/propose/suggest/cancel
+│   │   └── health.ts          # /api/health endpoint for start.sh
 │   ├── db/
 │   │   └── index.ts           # SQLite schema, migrations, query helpers
 │   └── gateway/
 │       ├── server.ts          # Express + WebSocket server
-│       ├── api.ts             # REST API (status, sessions, channels, config, soul, memory, cron, skills)
+│       ├── api.ts             # REST API (status, sessions, channels, config, soul, memory, cron, skills, evolutions)
 │       └── ui/                # React SPA (Vite)
 │           ├── App.tsx         # Layout, routing, shared styles
-│           └── pages/          # Status, Sessions, Channels, Config, Cron, Skills, Logs
+│           └── pages/          # Status, Sessions, Channels, Config, Cron, Skills, Evolution, Logs
 ├── data/                      # Runtime data (gitignored)
 │   ├── discordclaw.db         # SQLite database
 │   ├── SOUL.md                # Bot personality
 │   ├── MEMORY.md              # Long-term memory
 │   ├── memory/                # Daily memory notes
 │   ├── cron/                  # Job store + run history
-│   └── skills/                # Installed skills (SKILL.md + companion files)
+│   ├── skills/                # Installed skills (SKILL.md + companion files)
+│   └── .migrations/           # Marker files for completed migrations
+├── migrations/                # Idempotent migration scripts (run by start.sh)
+├── start.sh                   # Production startup: pull → migrate → build → start → health check
 ├── .env                       # DISCORD_BOT_TOKEN, ANTHROPIC_* config
 ├── package.json
 ├── tsconfig.json
@@ -263,8 +315,11 @@ cp .env.example .env
 # Build dashboard
 npm run build:ui
 
-# Run
+# Development
 npm run dev
+
+# Production (with auto-pull, migrations, health check, rollback)
+./start.sh
 ```
 
 The bot responds to **@mentions** in guild channels and all **DMs**. Dashboard available at `http://localhost:3000`.
@@ -280,6 +335,7 @@ The bot responds to **@mentions** in guild channels and all **DMs**. Dashboard a
 | `ANTHROPIC_MODEL` | No | Model name (default: `bedrock-claude-opus-4-6-1m`) |
 | `GATEWAY_PORT` | No | Dashboard port (default: `3000`) |
 | `SESSION_TTL_HOURS` | No | Session expiry (default: `24`) |
+| `DISCORD_WEBHOOK_URL` | No | Webhook for `start.sh` notifications (deploy, rollback alerts) |
 
 *Either `ANTHROPIC_API_KEY` or `ANTHROPIC_BASE_URL` + `ANTHROPIC_AUTH_TOKEN` required.
 
@@ -295,10 +351,12 @@ The bot responds to **@mentions** in guild channels and all **DMs**. Dashboard a
 
 **Skills** — Modular capabilities defined as SKILL.md files with YAML frontmatter. Install from GitHub URL or upload directly. Uses SDK progressive loading pattern: only skill metadata (name, description, path) is injected into the system prompt; the agent reads full skill content on demand via `read_skill` tool. Skills can include companion files (scripts, references). Manageable via dashboard.
 
-**Dashboard** — Single-page React app at `http://localhost:3000`. Status, session browser, channel config, soul/memory editor, cron manager, skills manager, real-time message logs via WebSocket.
+**Dashboard** — Single-page React app at `http://localhost:3000`. Status, session browser, channel config, soul/memory editor, cron manager, skills manager, evolution history, real-time message logs via WebSocket.
 
 **Agent Loop** — The tool-use loop runs until the model produces a final text response. To prevent infinite loops, consecutive duplicate tool calls (same tool + same arguments) are detected — after 2 identical rounds the agent is forced to produce a final response. Typing indicator refreshes every 8 seconds to stay visible during long tool chains.
 
 **File Attachments** — The agent can send files (PDFs, images, HTML, etc.) to Discord channels via the `send_file` tool. Files up to 25 MB are supported (Discord bot default tier).
+
+**Evolution Engine** — The bot can modify its own source code through GitHub pull requests. All changes are isolated in a git worktree at `beta/`, typechecked, and submitted as PRs via `gh` CLI. The agent has 7 evolution tools: `evolve_start`, `evolve_read`, `evolve_write`, `evolve_bash`, `evolve_propose`, `evolve_suggest`, and `evolve_cancel`. The bot also records ideas for improvements it can't yet make (`evolve_suggest`). Evolution history is tracked in SQLite and viewable in the dashboard. An idempotent startup script (`start.sh`) handles deploy: `git pull` → run migrations → build → start → health check → auto-rollback on failure.
 
 **Restart** — The bot can restart itself via slash command. On restart, stale instances are automatically detected and killed to prevent duplicate bots.
