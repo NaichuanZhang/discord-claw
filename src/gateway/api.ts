@@ -13,6 +13,12 @@ import type { SkillService } from "../skills/service.js";
 import { getMemoryLines } from "../memory/memory.js";
 import { triggerRestart } from "../restart.js";
 import { registerHealthRoute } from "../evolution/health.js";
+import {
+  listEvolutions,
+  getEvolution,
+  getIdeas,
+  updateEvolution,
+} from "../evolution/log.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = join(__dirname, "..", "..");
@@ -513,6 +519,58 @@ export function createApiRouter(opts: {
       res.json({ runs });
     } catch (err) {
       log("Error in GET /cron/:id/runs:", err);
+      res.status(500).json({ error: String(err) });
+    }
+  });
+
+  // =========================================================================
+  // Evolutions
+  // =========================================================================
+
+  router.get("/evolutions", (req: Request, res: Response) => {
+    try {
+      const status = req.query.status as string | undefined;
+      const evolutions = status
+        ? listEvolutions({ status: status as any })
+        : listEvolutions();
+      res.json({ evolutions });
+    } catch (err) {
+      log("Error in GET /evolutions:", err);
+      res.status(500).json({ error: String(err) });
+    }
+  });
+
+  router.get("/evolutions/:id", (req: Request, res: Response) => {
+    try {
+      const id = param(req, "id");
+      const evolution = getEvolution(id);
+      if (!evolution) {
+        res.status(404).json({ error: "Evolution not found" });
+        return;
+      }
+      res.json(evolution);
+    } catch (err) {
+      log("Error in GET /evolutions/:id:", err);
+      res.status(500).json({ error: String(err) });
+    }
+  });
+
+  router.post("/evolutions/:id/dismiss", (req: Request, res: Response) => {
+    try {
+      const id = param(req, "id");
+      const evolution = getEvolution(id);
+      if (!evolution) {
+        res.status(404).json({ error: "Evolution not found" });
+        return;
+      }
+      if (evolution.status !== "idea") {
+        res.status(400).json({ error: "Can only dismiss ideas" });
+        return;
+      }
+      updateEvolution(id, { status: "rejected" });
+      res.json({ ok: true });
+    } catch (err) {
+      log("Error in POST /evolutions/:id/dismiss:", err);
       res.status(500).json({ error: String(err) });
     }
   });
