@@ -76,9 +76,12 @@ export async function startBot(client: Client): Promise<void> {
       }
     }
 
-    // Mark DMs as processed for dedup with raw fallback
+    // Dedup DMs: skip if the raw fallback already claimed this message
     if (message.channel.isDMBased()) {
-      markProcessed(message.id);
+      if (!markProcessed(message.id)) {
+        console.log(`[bot] DM ${message.id} already handled by raw fallback, skipping`);
+        return;
+      }
     }
 
     try {
