@@ -96,6 +96,7 @@ sequenceDiagram
     S->>DB: lookup / create session
     S-->>B: session + history
 
+    B->>B: Start typing indicator (refreshes every 8s)
     B->>A: processMessage(text, history, context)
     A->>A: Build system prompt (soul + memory instructions + channel config)
     A->>C: messages.create(system, messages, tools)
@@ -103,14 +104,16 @@ sequenceDiagram
     loop Tool Use Loop (with duplicate detection)
         C-->>A: tool_use: memory_search
         A->>M: searchMemory(query)
-        M->>DB: FTS5 MATCH query
+        M->>DB: FTS5 MATCH query (sanitized)
         M-->>A: ranked results
         A->>C: tool_result + continue
+        A->>A: Check for duplicate tool calls
     end
 
     C-->>A: text response
     A-->>B: response string
 
+    B->>B: Stop typing indicator
     B->>DB: log user message
     B->>DB: log assistant response
     B->>U: message.reply(response)
@@ -187,13 +190,14 @@ graph LR
 discordclaw/
 ├── src/
 │   ├── index.ts              # Entry point: start all systems, kill stale instances on restart
+│   ├── restart.ts            # Shared restart trigger — avoids circular deps
 │   ├── bot/                   # Discord bot (discord.js v14)
 │   │   ├── client.ts          # Client setup, intents, event routing, DM raw fallback
-│   │   ├── messages.ts        # Message pipeline: filter → session → agent → reply (persistent typing indicator)
+│   │   ├── messages.ts        # Message pipeline: filter → session → agent → reply (persistent typing)
 │   │   ├── commands.ts        # Slash commands: /help /config /sessions /forget /soul
 │   │   └── components.ts      # Button/select interaction handler
 │   ├── agent/                 # Claude integration
-│   │   ├── agent.ts           # Anthropic SDK wrapper, system prompt, tool loop with duplicate detection
+│   │   ├── agent.ts           # Anthropic SDK wrapper, system prompt, tool loop + duplicate detection
 │   │   ├── tools.ts           # Discord tools (send_message, send_file, add_reaction, get_history)
 │   │   ├── dangerous-tools.ts # Powerful tools: bash, read_file, write_file
 │   │   └── sessions.ts        # Per-thread/DM session tracking + TTL
@@ -243,7 +247,7 @@ discordclaw/
    - **Message Content Intent** (required)
    - **Server Members Intent** (recommended)
 5. Go to **OAuth2 > URL Generator**, select scopes: `bot`, `applications.commands`
-6. Select permissions: Send Messages, Read Message History, Add Reactions, Use Slash Commands, Attach Files
+6. Select permissions: Send Messages, Read Message History, Add Reactions, Attach Files, Use Slash Commands
 7. Use the generated URL to invite the bot to your server
 
 ### Install & Run
@@ -283,7 +287,7 @@ The bot responds to **@mentions** in guild channels and all **DMs**. Dashboard a
 
 **Soul** — Bot personality defined in `data/SOUL.md`. Hot-reloads on file change. Editable via dashboard.
 
-**Memory** — Markdown files in `data/` indexed with SQLite FTS5. The agent searches memory before answering questions about past context. BM25 ranked results. Queries are sanitized for FTS5 special characters.
+**Memory** — Markdown files in `data/` indexed with SQLite FTS5. The agent searches memory before answering questions about past context. BM25 ranked results. Queries are sanitized for FTS5 compatibility (special characters like hyphens and colons are handled automatically).
 
 **Sessions** — Per-thread/DM/channel conversation tracking. History loaded as context for each message. Auto-expires after TTL.
 
@@ -293,12 +297,8 @@ The bot responds to **@mentions** in guild channels and all **DMs**. Dashboard a
 
 **Dashboard** — Single-page React app at `http://localhost:3000`. Status, session browser, channel config, soul/memory editor, cron manager, skills manager, real-time message logs via WebSocket.
 
-## Agent Behavior
+**Agent Loop** — The tool-use loop runs until the model produces a final text response. To prevent infinite loops, consecutive duplicate tool calls (same tool + same arguments) are detected — after 2 identical rounds the agent is forced to produce a final response. Typing indicator refreshes every 8 seconds to stay visible during long tool chains.
 
-**Tool Loop** — The agent runs tool calls in a loop until it produces a text response. Instead of a fixed turn limit, it uses **duplicate detection**: if the same tool is called with identical arguments for 2 consecutive turns, the loop breaks and the agent is forced to produce a final text response.
+**File Attachments** — The agent can send files (PDFs, images, HTML, etc.) to Discord channels via the `send_file` tool. Files up to 25 MB are supported (Discord bot default tier).
 
-**Typing Indicator** — The bot sends a typing indicator every 8 seconds while processing, so Discord shows "Bot is typing..." for the full duration of long agent turns.
-
-**File Sending** — The agent can send files (PDFs, images, HTML, etc.) as Discord attachments via the `send_file` tool, with automatic file size validation (25 MB limit).
-
-**Restart Safety** — On restart, the process kills any stale instances of itself to prevent duplicate bots from running simultaneously.
+**Restart** — The bot can restart itself via slash command. On restart, stale instances are automatically detected and killed to prevent duplicate bots.
