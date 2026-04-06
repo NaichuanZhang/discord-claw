@@ -9,6 +9,7 @@ import { listSessions, clearSession } from "../agent/sessions.js";
 import { getSoul, setSoul } from "../soul/soul.js";
 import type { CronService } from "../cron/service.js";
 import type { CronJobCreate, CronJobPatch } from "../cron/types.js";
+import type { SkillService } from "../skills/service.js";
 import { getMemoryLines } from "../memory/memory.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -46,9 +47,10 @@ function param(req: Request, name: string): string {
 
 export function createApiRouter(opts: {
   cronService: CronService;
+  skillService: SkillService;
   discordClient?: any;
 }): Router {
-  const { cronService, discordClient } = opts;
+  const { cronService, skillService, discordClient } = opts;
   const router = Router();
 
   // =========================================================================
@@ -348,6 +350,85 @@ export function createApiRouter(opts: {
       res.json({ ok: true });
     } catch (err) {
       log("Error in PUT /memory/:path:", err);
+      res.status(500).json({ error: String(err) });
+    }
+  });
+
+  // =========================================================================
+  // Skills
+  // =========================================================================
+
+  router.get("/skills", (_req, res) => {
+    try {
+      const skills = skillService.list();
+      res.json({ skills });
+    } catch (err) {
+      log("Error in GET /skills:", err);
+      res.status(500).json({ error: String(err) });
+    }
+  });
+
+  router.get("/skills/:id", (req, res) => {
+    try {
+      const id = param(req, "id");
+      const skill = skillService.get(id);
+      if (!skill) { res.status(404).json({ error: "Skill not found" }); return; }
+      res.json(skill);
+    } catch (err) {
+      log("Error in GET /skills/:id:", err);
+      res.status(500).json({ error: String(err) });
+    }
+  });
+
+  router.post("/skills", async (req, res) => {
+    try {
+      const { source, content, url, name } = req.body as {
+        source: "upload" | "github";
+        content?: string;
+        url?: string;
+        name?: string;
+      };
+
+      let skill;
+      if (source === "github") {
+        if (!url) { res.status(400).json({ error: "url is required for GitHub install" }); return; }
+        skill = await skillService.installFromGitHub({ url, name });
+      } else if (source === "upload") {
+        if (!content) { res.status(400).json({ error: "content is required for upload" }); return; }
+        skill = await skillService.installFromUpload({ content, name });
+      } else {
+        res.status(400).json({ error: "source must be 'upload' or 'github'" });
+        return;
+      }
+
+      res.status(201).json(skill);
+    } catch (err) {
+      log("Error in POST /skills:", err);
+      res.status(500).json({ error: String(err) });
+    }
+  });
+
+  router.put("/skills/:id", async (req, res) => {
+    try {
+      const id = param(req, "id");
+      const { enabled, content } = req.body as { enabled?: boolean; content?: string };
+      const skill = await skillService.update(id, { enabled, content });
+      if (!skill) { res.status(404).json({ error: "Skill not found" }); return; }
+      res.json(skill);
+    } catch (err) {
+      log("Error in PUT /skills/:id:", err);
+      res.status(500).json({ error: String(err) });
+    }
+  });
+
+  router.delete("/skills/:id", (req, res) => {
+    try {
+      const id = param(req, "id");
+      const removed = skillService.remove(id);
+      if (!removed) { res.status(404).json({ error: "Skill not found" }); return; }
+      res.json({ ok: true });
+    } catch (err) {
+      log("Error in DELETE /skills/:id:", err);
       res.status(500).json({ error: String(err) });
     }
   });

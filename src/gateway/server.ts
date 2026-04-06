@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { existsSync } from "node:fs";
 import { createApiRouter } from "./api.js";
 import type { CronService } from "../cron/service.js";
+import type { SkillService } from "../skills/service.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -36,9 +37,10 @@ export function startGateway(opts: {
   port: number;
   token: string;
   cronService: CronService;
+  skillService: SkillService;
   discordClient?: any;
 }): { close: () => void } {
-  const { port, token, cronService, discordClient } = opts;
+  const { port, token, cronService, skillService, discordClient } = opts;
 
   const app = express();
 
@@ -50,7 +52,7 @@ export function startGateway(opts: {
   app.use(express.json());
 
   // ---------- API routes ----------
-  const apiRouter = createApiRouter({ cronService, discordClient });
+  const apiRouter = createApiRouter({ cronService, skillService, discordClient });
   app.use("/api", apiRouter);
 
   // ---------- Static files for dashboard SPA ----------

@@ -4,6 +4,7 @@ import { initDb } from "./db/index.js";
 import { initSoul, stopSoulWatcher } from "./soul/soul.js";
 import { initMemory, stopMemoryWatcher } from "./memory/memory.js";
 import { CronService } from "./cron/service.js";
+import { SkillService } from "./skills/service.js";
 import { processAgentTurn } from "./agent/agent.js";
 import { createClient, startBot, stopBot } from "./bot/client.js";
 import { startGateway } from "./gateway/server.js";
@@ -27,6 +28,11 @@ async function main(): Promise<void> {
   // 3. Index memory files
   console.log("[discordclaw] Indexing memory...");
   await initMemory();
+
+  // 3.5 Initialize skills
+  console.log("[discordclaw] Loading skills...");
+  const skillService = new SkillService();
+  await skillService.init();
 
   // 4. Start cron service
   console.log("[discordclaw] Starting cron service...");
@@ -59,6 +65,7 @@ async function main(): Promise<void> {
     port,
     token,
     cronService,
+    skillService,
     discordClient: client,
   });
 
@@ -79,6 +86,7 @@ async function main(): Promise<void> {
   console.log(`[discordclaw] Bot online as ${client.user?.tag}`);
   console.log(`[discordclaw] Guilds: ${guilds.size}`);
   console.log(`[discordclaw] Cron jobs: ${cronJobs.length}`);
+  console.log(`[discordclaw] Skills: ${skillService.list().length}`);
   console.log(`[discordclaw] Gateway: http://localhost:${port}`);
   console.log("[discordclaw] ========================================");
 
@@ -98,6 +106,7 @@ async function main(): Promise<void> {
     // Stop file watchers
     stopSoulWatcher();
     stopMemoryWatcher();
+    skillService.stop();
 
     // Close gateway
     gateway.close();

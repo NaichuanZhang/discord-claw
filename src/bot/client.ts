@@ -45,6 +45,24 @@ export async function registerCommands(client: Client): Promise<void> {
 export async function startBot(client: Client): Promise<void> {
   // Wire up event handlers
   client.on("messageCreate", async (message) => {
+    // Fetch partial channel/message if needed (required for DMs in discord.js v14)
+    if (message.partial) {
+      try {
+        await message.fetch();
+      } catch (err) {
+        console.error("[bot] Failed to fetch partial message:", err);
+        return;
+      }
+    }
+    if (message.channel.partial) {
+      try {
+        await message.channel.fetch();
+      } catch (err) {
+        console.error("[bot] Failed to fetch partial channel:", err);
+        return;
+      }
+    }
+
     try {
       await handleMessage(message);
     } catch (err) {

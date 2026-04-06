@@ -4,6 +4,7 @@ import Sessions from "./pages/Sessions";
 import Channels from "./pages/Channels";
 import Config from "./pages/Config";
 import Cron from "./pages/Cron";
+import Skills from "./pages/Skills";
 import Logs from "./pages/Logs";
 
 // ── Helpers ──────────────────────────────────────────────────────────
@@ -184,6 +185,7 @@ const pages: Record<string, { label: string; component: React.FC }> = {
   channels: { label: "Channels", component: Channels },
   config: { label: "Config", component: Config },
   cron: { label: "Cron", component: Cron },
+  skills: { label: "Skills", component: Skills },
   logs: { label: "Logs", component: Logs },
 };
 

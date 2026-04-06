@@ -196,6 +196,11 @@ discordclaw/
 │   │   ├── agent.ts           # Anthropic SDK wrapper, system prompt, tool loop
 │   │   ├── tools.ts           # Discord tools (send_message, add_reaction, get_history)
 │   │   └── sessions.ts        # Per-thread/DM session tracking + TTL
+│   ├── skills/                # Skills management (SDK pattern)
+│   │   ├── types.ts           # Skill, SkillMeta, SkillSource types
+│   │   ├── store.ts           # File persistence + metadata JSON
+│   │   ├── service.ts         # CRUD, GitHub install, prompt generation, file watcher
+│   │   └── tools.ts           # read_skill + list_skill_files tool definitions
 │   ├── soul/
 │   │   └── soul.ts            # Load SOUL.md, file watcher, hot-reload
 │   ├── memory/
@@ -209,16 +214,17 @@ discordclaw/
 │   │   └── index.ts           # SQLite schema, migrations, query helpers
 │   └── gateway/
 │       ├── server.ts          # Express + WebSocket server
-│       ├── api.ts             # REST API (status, sessions, channels, config, soul, memory, cron)
+│       ├── api.ts             # REST API (status, sessions, channels, config, soul, memory, cron, skills)
 │       └── ui/                # React SPA (Vite)
 │           ├── App.tsx         # Layout, routing, shared styles
-│           └── pages/          # Status, Sessions, Channels, Config, Cron, Logs
+│           └── pages/          # Status, Sessions, Channels, Config, Cron, Skills, Logs
 ├── data/                      # Runtime data (gitignored)
 │   ├── discordclaw.db         # SQLite database
 │   ├── SOUL.md                # Bot personality
 │   ├── MEMORY.md              # Long-term memory
 │   ├── memory/                # Daily memory notes
-│   └── cron/                  # Job store + run history
+│   ├── cron/                  # Job store + run history
+│   └── skills/                # Installed skills (SKILL.md + companion files)
 ├── .env                       # DISCORD_BOT_TOKEN, ANTHROPIC_* config
 ├── package.json
 ├── tsconfig.json
@@ -282,4 +288,6 @@ The bot responds to **@mentions** in guild channels and all **DMs**. Dashboard a
 
 **Cron** — Scheduled tasks with three schedule types: one-shot (`at`), interval (`every`), cron expression (`cron`). Jobs can run agent turns and deliver results to Discord channels. Auto-disables after 3 consecutive failures.
 
-**Dashboard** — Single-page React app at `http://localhost:3000`. Status, session browser, channel config, soul/memory editor, cron manager, real-time message logs via WebSocket.
+**Skills** — Modular capabilities defined as SKILL.md files with YAML frontmatter. Install from GitHub URL or upload directly. Uses SDK progressive loading pattern: only skill metadata (name, description, path) is injected into the system prompt; the agent reads full skill content on demand via `read_skill` tool. Skills can include companion files (scripts, references). Manageable via dashboard.
+
+**Dashboard** — Single-page React app at `http://localhost:3000`. Status, session browser, channel config, soul/memory editor, cron manager, skills manager, real-time message logs via WebSocket.

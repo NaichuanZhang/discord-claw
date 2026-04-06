@@ -2,7 +2,9 @@ import Anthropic from "@anthropic-ai/sdk";
 import { getSoul } from "../soul/soul.js";
 import { memoryTools, handleMemoryTool } from "../memory/tools.js";
 import { discordTools, handleDiscordTool } from "./tools.js";
+import { skillTools, handleSkillTool } from "../skills/tools.js";
 import type { Message, ChannelConfig } from "../db/index.js";
+import { getSkillService } from "../skills/service.js";
 
 // ---------------------------------------------------------------------------
 // Anthropic client (singleton)
@@ -58,6 +60,7 @@ Search memory when:
 const allTools: Anthropic.Messages.Tool[] = [
   ...memoryTools,
   ...discordTools,
+  ...skillTools,
 ] as Anthropic.Messages.Tool[];
 
 // ---------------------------------------------------------------------------
@@ -82,6 +85,12 @@ function buildSystemPrompt(opts: {
   const soul = getSoul();
   if (soul) {
     parts.push(`## Soul\n\n${soul}`);
+  }
+
+  // 2.5. Skills content
+  const skillsPrompt = getSkillService()?.buildSkillsPromptSection();
+  if (skillsPrompt) {
+    parts.push(skillsPrompt);
   }
 
   // 3. Memory recall instructions
@@ -151,6 +160,11 @@ async function executeTool(
   // Discord tools are async
   if (name === "send_message" || name === "add_reaction" || name === "get_channel_history") {
     return await handleDiscordTool(name, input);
+  }
+
+  // Skill tools are synchronous
+  if (name === "read_skill" || name === "list_skill_files") {
+    return handleSkillTool(name, input);
   }
 
   return JSON.stringify({ error: `Unknown tool: ${name}` });
@@ -252,6 +266,10 @@ export async function processAgentTurn(opts: {
   const systemParts: string[] = [BASE_INSTRUCTIONS];
   if (soul) {
     systemParts.push(`## Soul\n\n${soul}`);
+  }
+  const skillsPrompt = getSkillService()?.buildSkillsPromptSection();
+  if (skillsPrompt) {
+    systemParts.push(skillsPrompt);
   }
   systemParts.push(MEMORY_RECALL_INSTRUCTIONS);
 
