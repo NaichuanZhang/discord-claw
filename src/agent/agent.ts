@@ -208,7 +208,8 @@ async function executeTool(
     name === "evolve_write" ||
     name === "evolve_bash" ||
     name === "evolve_propose" ||
-    name === "evolve_suggest"
+    name === "evolve_suggest" ||
+    name === "evolve_cancel"
   ) {
     return await handleEvolutionTool(name, input);
   }

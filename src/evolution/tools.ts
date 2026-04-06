@@ -127,6 +127,16 @@ export const evolutionTools = [
       required: ["what", "why"],
     },
   },
+  {
+    name: "evolve_cancel",
+    description:
+      "Cancel the current active evolution session. Cleans up the worktree and deletes the branch. Use if you need to abandon an in-progress evolution.",
+    input_schema: {
+      type: "object" as const,
+      properties: {},
+      required: [],
+    },
+  },
 ];
 
 // ---------------------------------------------------------------------------
@@ -299,6 +309,18 @@ export async function handleEvolutionTool(
           success: true,
           idea_id: evolution.id,
           message: "Suggestion recorded. It can be reviewed and implemented later.",
+        });
+      }
+
+      case "evolve_cancel": {
+        const active = getActiveEvolution();
+        if (!active) {
+          return JSON.stringify({ error: "No active evolution to cancel." });
+        }
+        await cancelEvolution(active.id);
+        return JSON.stringify({
+          success: true,
+          message: `Evolution ${active.id} cancelled.`,
         });
       }
 

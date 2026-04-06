@@ -201,6 +201,7 @@ export async function finalizeEvolution(opts: {
 
   // 4. Create PR via gh CLI
   log("Creating PR...");
+  const migrationFiles = filesChanged.filter((f) => f.startsWith("migrations/"));
   const prBody = [
     `## Evolution: ${opts.summary}`,
     "",
@@ -209,6 +210,11 @@ export async function finalizeEvolution(opts: {
     "",
     "### Changes",
     ...filesChanged.map((f) => `- \`${f}\``),
+    "",
+    "### Migrations",
+    migrationFiles.length > 0
+      ? migrationFiles.map((f) => `- \`${f}\``).join("\n")
+      : "None",
     "",
     "---",
     "*This PR was created by the Evolution Engine.*",
