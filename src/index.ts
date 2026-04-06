@@ -1,5 +1,6 @@
 import "dotenv/config";
 
+import { spawn } from "node:child_process";
 import { initDb } from "./db/index.js";
 import { initSoul, stopSoulWatcher } from "./soul/soul.js";
 import { initMemory, stopMemoryWatcher } from "./memory/memory.js";
@@ -9,6 +10,7 @@ import { processAgentTurn } from "./agent/agent.js";
 import { createClient, startBot, stopBot } from "./bot/client.js";
 import { startGateway } from "./gateway/server.js";
 import { cleanExpiredSessions } from "./agent/sessions.js";
+import { setRestartHandler } from "./restart.js";
 
 // ---------------------------------------------------------------------------
 // Startup
@@ -120,6 +122,29 @@ async function main(): Promise<void> {
 
   process.on("SIGINT", () => shutdown("SIGINT"));
   process.on("SIGTERM", () => shutdown("SIGTERM"));
+
+  // Wire restart: graceful shutdown → spawn new process → exit
+  setRestartHandler(() => {
+    console.log("[discordclaw] Restart requested...");
+    (async () => {
+      clearInterval(cleanupInterval);
+      cronService.stop();
+      stopSoulWatcher();
+      stopMemoryWatcher();
+      skillService.stop();
+      gateway.close();
+      await stopBot(client);
+
+      // Include execArgv so tsx loader hooks (--require, --import) are preserved
+      const child = spawn(
+        process.execPath,
+        [...process.execArgv, ...process.argv.slice(1)],
+        { detached: true, stdio: "inherit", env: process.env },
+      );
+      child.unref();
+      process.exit(0);
+    })();
+  });
 }
 
 main().catch((err) => {

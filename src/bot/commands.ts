@@ -7,6 +7,7 @@ import {
 import { listSessions, clearSession, resolveSession } from "../agent/sessions.js";
 import { getChannelConfig, setChannelConfig } from "../db/index.js";
 import { getSoul } from "../soul/soul.js";
+import { triggerRestart } from "../restart.js";
 import { handleComponentInteraction } from "./components.js";
 
 // ---------------------------------------------------------------------------
@@ -59,6 +60,10 @@ export const slashCommands: ApplicationCommandData[] = [
     name: "soul",
     description: "Show the current soul (personality) content",
   },
+  {
+    name: "restart",
+    description: "Restart the bot process",
+  },
 ];
 
 // ---------------------------------------------------------------------------
@@ -93,6 +98,10 @@ export async function handleInteraction(interaction: Interaction): Promise<void>
         break;
       case "soul":
         await handleSoul(interaction);
+        break;
+      case "restart":
+        await interaction.reply({ content: "Restarting...", ephemeral: true });
+        triggerRestart();
         break;
       default:
         await interaction.reply({
@@ -137,6 +146,7 @@ async function handleHelp(
           "`/sessions` — List recent sessions",
           "`/forget` — Clear the current session",
           "`/soul` — Show the bot personality",
+          "`/restart` — Restart the bot process",
         ].join("\n"),
       },
       {

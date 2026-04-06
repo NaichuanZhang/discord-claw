@@ -11,6 +11,7 @@ import type { CronService } from "../cron/service.js";
 import type { CronJobCreate, CronJobPatch } from "../cron/types.js";
 import type { SkillService } from "../skills/service.js";
 import { getMemoryLines } from "../memory/memory.js";
+import { triggerRestart } from "../restart.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = join(__dirname, "..", "..");
@@ -517,7 +518,8 @@ export function createApiRouter(opts: {
   // =========================================================================
 
   router.post("/bot/restart", (_req: Request, res: Response) => {
-    res.status(501).json({ message: "Not implemented" });
+    res.json({ message: "Restarting..." });
+    triggerRestart();
   });
 
   return router;
