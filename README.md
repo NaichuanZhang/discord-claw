@@ -238,7 +238,7 @@ discordclaw/
 │   ├── bot/                   # Discord bot (discord.js v14)
 │   │   ├── client.ts          # Client setup, intents, event routing, DM raw fallback
 │   │   ├── messages.ts        # Message pipeline: filter → session → agent → reply (persistent typing)
-│   │   ├── commands.ts        # Slash commands: /help /config /sessions /forget /soul
+│   │   ├── commands.ts        # Slash commands: /help /config /sessions /clear /soul
 │   │   └── components.ts      # Button/select interaction handler
 │   ├── agent/                 # Claude integration
 │   │   ├── agent.ts           # Anthropic SDK wrapper, system prompt, tool loop + duplicate detection

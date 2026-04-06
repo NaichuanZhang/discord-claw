@@ -64,7 +64,7 @@ export const slashCommands: ApplicationCommandData[] = [
     description: "List recent conversation sessions",
   },
   {
-    name: "forget",
+    name: "clear",
     description: "Clear the current session context",
   },
   {
@@ -166,8 +166,8 @@ export async function handleInteraction(interaction: Interaction): Promise<void>
       case "sessions":
         await handleSessions(interaction);
         break;
-      case "forget":
-        await handleForget(interaction);
+      case "clear":
+        await handleClear(interaction);
         break;
       case "soul":
         await handleSoul(interaction);
@@ -220,7 +220,7 @@ async function handleHelp(
           "`/config set-prompt <prompt>` — Set a channel system prompt",
           "`/config toggle` — Enable/disable bot in this channel",
           "`/sessions` — List recent sessions",
-          "`/forget` — Clear the current session",
+          "`/clear` — Clear the current session",
           "`/soul` — Show the bot personality",
           "`/skills list` — List installed skills",
           "`/skills add-github <url>` — Install skill from GitHub",
@@ -354,10 +354,10 @@ async function handleSessions(
 }
 
 // ---------------------------------------------------------------------------
-// /forget
+// /clear
 // ---------------------------------------------------------------------------
 
-async function handleForget(
+async function handleClear(
   interaction: import("discord.js").ChatInputCommandInteraction,
 ): Promise<void> {
   const isDM = !interaction.guildId;

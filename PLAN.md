@@ -18,7 +18,7 @@ discordclaw/
 │   ├── bot/                  # Discord bot (discord.js v14)
 │   │   ├── client.ts         # Client setup, intent config, event routing
 │   │   ├── messages.ts       # Message handler: filter → session → agent → reply
-│   │   ├── commands.ts       # Slash commands: /help, /config, /sessions, /forget
+│   │   ├── commands.ts       # Slash commands: /help, /config, /sessions, /clear
 │   │   └── components.ts     # Button/select menu interaction handlers
 │   ├── agent/                # Claude Agent SDK integration
 │   │   ├── agent.ts          # query() wrapper, system prompt assembly, streaming
@@ -84,7 +84,7 @@ discordclaw/
 - `/help` — Show bot capabilities
 - `/config` — Show/edit channel config (system prompt override, enabled)
 - `/sessions` — List recent conversation sessions
-- `/forget` — Clear current session context
+- `/clear` — Clear current session context
 - `/soul` — Show current soul (personality)
 
 **components.ts** — Handle button clicks and select menu interactions from agent-generated components.
@@ -413,7 +413,7 @@ Startup sequence:
 ### Step 5: Discord bot
 - `src/bot/client.ts` — Discord.js client setup
 - `src/bot/messages.ts` — Message pipeline (filter → session → agent → reply)
-- `src/bot/commands.ts` — Slash commands (/help, /config, /sessions, /forget, /soul, /cron)
+- `src/bot/commands.ts` — Slash commands (/help, /config, /sessions, /clear, /soul, /cron)
 - `src/bot/components.ts` — Component interaction handler
 
 ### Step 6: Cron system
@@ -443,7 +443,7 @@ Startup sequence:
 3. **Session persistence**: Send follow-up in same thread → verify context preserved
 4. **Soul**: Edit SOUL.md → send message → verify personality change reflected
 5. **Memory**: Write to MEMORY.md → ask bot about it → verify it searches and recalls
-6. **Slash commands**: Test /help, /config, /sessions, /forget in Discord
+6. **Slash commands**: Test /help, /config, /sessions, /clear in Discord
 7. **Dashboard**: Open gateway URL → verify status page shows connected guilds
 8. **Dashboard config**: Edit soul via dashboard → verify file updated + bot reflects change
 9. **Real-time logs**: Open logs page → send Discord message → verify appears in real-time
