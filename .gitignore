@@ -9,3 +9,5 @@ data/serve/
 .env
 reference/
 .claude-design/
+beta/
+data/.migrations/

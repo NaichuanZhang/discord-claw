@@ -12,6 +12,8 @@ import { setCommandsSkillService } from "./bot/commands.js";
 import { startGateway } from "./gateway/server.js";
 import { cleanExpiredSessions } from "./agent/sessions.js";
 import { setRestartHandler } from "./restart.js";
+import { syncDeployedEvolutions, setEvolutionSendToDiscord, checkGhCli } from "./evolution/engine.js";
+import { setHealthDiscordClient, setServicesReady } from "./evolution/health.js";
 
 // ---------------------------------------------------------------------------
 // Startup
@@ -71,6 +73,12 @@ async function main(): Promise<void> {
   await skillService.init();
   setCommandsSkillService(skillService);
 
+  // 3.7 Check gh CLI availability
+  const ghAvailable = await checkGhCli();
+  if (!ghAvailable) {
+    console.warn("[discordclaw] WARNING: gh CLI not authenticated — evolution PRs will fail");
+  }
+
   // 4. Start cron service
   console.log("[discordclaw] Starting cron service...");
   const cronService = new CronService();
@@ -95,6 +103,19 @@ async function main(): Promise<void> {
     await channel.send(prefix + text);
   });
 
+  // Wire evolution → Discord delivery
+  setEvolutionSendToDiscord(async (channelId, text) => {
+    const channel: any = await client.channels.fetch(channelId);
+    if (!channel?.send) {
+      console.error(`[evolution] Cannot send to channel ${channelId}`);
+      return;
+    }
+    await channel.send(text);
+  });
+
+  // Set health check references
+  setHealthDiscordClient(client);
+
   // 6. Start gateway server
   const port = parseInt(process.env.GATEWAY_PORT || "3000", 10);
   const token = process.env.GATEWAY_TOKEN || "discordclaw";
@@ -105,6 +126,19 @@ async function main(): Promise<void> {
     skillService,
     discordClient: client,
   });
+
+  // Mark services as ready for health check
+  setServicesReady(true);
+
+  // Sync deployed evolutions (check if any PRs were merged since last run)
+  try {
+    const deployed = await syncDeployedEvolutions();
+    if (deployed > 0) {
+      console.log(`[discordclaw] ${deployed} evolution(s) marked as deployed`);
+    }
+  } catch (err) {
+    console.error("[discordclaw] Failed to sync evolutions:", err);
+  }
 
   // 7. Schedule periodic session cleanup (every hour)
   const SESSION_CLEANUP_INTERVAL = 60 * 60 * 1000;
@@ -124,6 +158,7 @@ async function main(): Promise<void> {
   console.log(`[discordclaw] Guilds: ${guilds.size}`);
   console.log(`[discordclaw] Cron jobs: ${cronJobs.length}`);
   console.log(`[discordclaw] Skills: ${skillService.list().length}`);
+  console.log(`[discordclaw] gh CLI: ${ghAvailable ? "ready" : "NOT AVAILABLE"}`);
   console.log(`[discordclaw] Gateway: http://localhost:${port}`);
   console.log("[discordclaw] ========================================");
 
