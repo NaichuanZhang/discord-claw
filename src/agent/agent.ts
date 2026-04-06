@@ -4,6 +4,7 @@ import { memoryTools, handleMemoryTool } from "../memory/tools.js";
 import { discordTools, handleDiscordTool } from "./tools.js";
 import { skillTools, handleSkillTool } from "../skills/tools.js";
 import { dangerousTools, handleDangerousTool } from "./dangerous-tools.js";
+import { evolutionTools, handleEvolutionTool, setEvolutionContext } from "../evolution/tools.js";
 import type { Message, ChannelConfig } from "../db/index.js";
 import { getSkillService } from "../skills/service.js";
 
@@ -54,6 +55,28 @@ Search memory when:
 - You need context about a user, project, or ongoing topic
 - You want to check if you've discussed something before`;
 
+const EVOLUTION_INSTRUCTIONS = `## Self-Evolution
+
+You can modify your own source code through GitHub pull requests. All changes are isolated in a worktree and require human review before deployment.
+
+**Tools:**
+- \`evolve_start\`: Begin an evolution session (creates isolated worktree)
+- \`evolve_read\` / \`evolve_write\` / \`evolve_bash\`: Work within the worktree
+- \`evolve_propose\`: Submit changes as a PR (runs typecheck first)
+- \`evolve_suggest\`: Record an idea for a potential improvement
+
+**Rules:**
+- For any changes to source code (\`src/\`), TypeScript files, \`start.sh\`, or \`migrations/\`, you MUST use the evolution tools.
+- Do NOT modify source code directly with \`write_file\` or \`bash\`.
+- When you encounter a limitation you could fix by modifying your own code, use \`evolve_suggest\` to record the idea. Only start an evolution if the user explicitly asks you to implement a change.
+- Always use \`evolve_read\` to understand existing code before making changes.
+
+**Querying evolution history:**
+When users ask what you've learned, what improvements you're thinking about, or what PRs are pending, query the evolutions table:
+- Deployed: \`bash\` → \`sqlite3 data/discordclaw.db "SELECT id, changes_summary, deployed_at FROM evolutions WHERE status='deployed' ORDER BY deployed_at DESC LIMIT 10"\`
+- Ideas: \`bash\` → \`sqlite3 data/discordclaw.db "SELECT id, trigger_message FROM evolutions WHERE status='idea' ORDER BY created_at DESC LIMIT 10"\`
+- Pending PRs: \`bash\` → \`sqlite3 data/discordclaw.db "SELECT id, pr_url, changes_summary FROM evolutions WHERE status='proposed'"\``;
+
 // ---------------------------------------------------------------------------
 // All tools combined
 // ---------------------------------------------------------------------------
@@ -63,6 +86,7 @@ const allTools: Anthropic.Messages.Tool[] = [
   ...discordTools,
   ...skillTools,
   ...dangerousTools,
+  ...evolutionTools,
 ] as Anthropic.Messages.Tool[];
 
 // ---------------------------------------------------------------------------
@@ -97,6 +121,9 @@ function buildSystemPrompt(opts: {
 
   // 3. Memory recall instructions
   parts.push(MEMORY_RECALL_INSTRUCTIONS);
+
+  // 3.5 Evolution instructions
+  parts.push(EVOLUTION_INSTRUCTIONS);
 
   // 4. Channel-specific instructions
   if (opts.channelConfig?.systemPrompt) {
@@ -174,6 +201,18 @@ async function executeTool(
     return await handleDangerousTool(name, input);
   }
 
+  // Evolution tools
+  if (
+    name === "evolve_start" ||
+    name === "evolve_read" ||
+    name === "evolve_write" ||
+    name === "evolve_bash" ||
+    name === "evolve_propose" ||
+    name === "evolve_suggest"
+  ) {
+    return await handleEvolutionTool(name, input);
+  }
+
   return JSON.stringify({ error: `Unknown tool: ${name}` });
 }
 
@@ -197,6 +236,9 @@ export async function processMessage(opts: {
     context: opts.context,
     channelConfig: opts.channelConfig,
   });
+
+  // Set evolution context so tools know the triggering user
+  setEvolutionContext(undefined, opts.context.userId);
 
   // Build conversation history and append the current message
   const messages: Anthropic.Messages.MessageParam[] = [
