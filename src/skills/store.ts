@@ -2,49 +2,89 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { nanoid } from "nanoid";
-import type { SkillMeta, SkillSource, SkillsStoreData } from "./types.js";
+import type { SkillMeta, SkillSource } from "./types.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = path.resolve(__dirname, "..", "..");
 
 const SKILLS_DIR = path.join(PROJECT_ROOT, "data", "skills");
-const META_PATH = path.join(SKILLS_DIR, "meta.json");
-const META_TMP_PATH = META_PATH + ".tmp";
 const MAX_SKILL_SIZE = 256 * 1024; // 256 KB
 
 function log(...args: unknown[]): void {
   console.log("[skills-store]", ...args);
 }
 
+/**
+ * Per-skill metadata stored in each skill's own directory as .meta.json.
+ * The skills list is derived by scanning directories — no central meta.json.
+ */
+interface PerSkillMeta {
+  id: string;
+  source: SkillSource;
+  enabled: boolean;
+  installedAt: number;
+  updatedAt: number;
+}
+
 export class SkillStore {
   private skills: SkillMeta[] = [];
 
-  /** Load skill metadata from disk (or create empty store). */
+  /**
+   * Scan the skills directory for subdirectories containing SKILL.md.
+   * Each skill's own .meta.json provides id, source, enabled state.
+   * If .meta.json is missing, we create defaults (local source, enabled).
+   */
   load(): SkillMeta[] {
-    try {
-      const raw = fs.readFileSync(META_PATH, "utf-8");
-      const data: SkillsStoreData = JSON.parse(raw);
-      this.skills = data.skills ?? [];
-      log(`Loaded ${this.skills.length} skill(s) from disk`);
-    } catch (err: unknown) {
-      if (isNodeError(err) && err.code === "ENOENT") {
-        log("No meta file found, starting with empty store");
-        this.skills = [];
-      } else {
-        log("Error loading meta file, starting with empty store:", err);
-        this.skills = [];
-      }
-    }
-    return this.skills;
-  }
+    this.skills = [];
 
-  /** Save current skill metadata to disk (atomic: write temp file, then rename). */
-  save(): void {
-    const data: SkillsStoreData = { version: 1, skills: this.skills };
-    const dir = path.dirname(META_PATH);
-    fs.mkdirSync(dir, { recursive: true });
-    fs.writeFileSync(META_TMP_PATH, JSON.stringify(data, null, 2), "utf-8");
-    fs.renameSync(META_TMP_PATH, META_PATH);
+    if (!fs.existsSync(SKILLS_DIR)) {
+      fs.mkdirSync(SKILLS_DIR, { recursive: true });
+      log("Created skills directory");
+      return this.skills;
+    }
+
+    const entries = fs.readdirSync(SKILLS_DIR, { withFileTypes: true });
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+
+      const skillDir = path.join(SKILLS_DIR, entry.name);
+      const skillMdPath = path.join(skillDir, "SKILL.md");
+
+      if (!fs.existsSync(skillMdPath)) continue;
+
+      const name = entry.name;
+      const metaPath = path.join(skillDir, ".meta.json");
+      let perMeta: PerSkillMeta;
+
+      try {
+        const raw = fs.readFileSync(metaPath, "utf-8");
+        perMeta = JSON.parse(raw) as PerSkillMeta;
+      } catch {
+        // No .meta.json or invalid — create defaults
+        const now = Date.now();
+        perMeta = {
+          id: nanoid(),
+          source: { type: "local" },
+          enabled: true,
+          installedAt: now,
+          updatedAt: now,
+        };
+        this.writePerSkillMeta(skillDir, perMeta);
+        log(`Created .meta.json for "${name}"`);
+      }
+
+      this.skills.push({
+        id: perMeta.id,
+        name,
+        source: perMeta.source,
+        enabled: perMeta.enabled,
+        installedAt: perMeta.installedAt,
+        updatedAt: perMeta.updatedAt,
+      });
+    }
+
+    log(`Scanned ${this.skills.length} skill(s) from disk`);
+    return this.skills;
   }
 
   /** Get all skill metadata (in-memory). */
@@ -85,17 +125,25 @@ export class SkillStore {
     fs.writeFileSync(path.join(skillDir, "SKILL.md"), content, "utf-8");
 
     const now = Date.now();
-    const meta: SkillMeta = {
+    const perMeta: PerSkillMeta = {
       id: nanoid(),
-      name,
       source,
       enabled: true,
       installedAt: now,
       updatedAt: now,
     };
+    this.writePerSkillMeta(skillDir, perMeta);
+
+    const meta: SkillMeta = {
+      id: perMeta.id,
+      name,
+      source,
+      enabled: perMeta.enabled,
+      installedAt: now,
+      updatedAt: now,
+    };
 
     this.skills.push(meta);
-    this.save();
     log(`Added skill "${name}" (${meta.id})`);
     return meta;
   }
@@ -123,7 +171,17 @@ export class SkillStore {
 
     Object.assign(meta, patch);
     meta.updatedAt = Date.now();
-    this.save();
+
+    // Persist to the skill's own .meta.json
+    const skillDir = this.getSkillDir(meta.name);
+    this.writePerSkillMeta(skillDir, {
+      id: meta.id,
+      source: meta.source,
+      enabled: meta.enabled,
+      installedAt: meta.installedAt,
+      updatedAt: meta.updatedAt,
+    });
+
     log(`Updated meta for skill "${meta.name}" (${meta.id})`);
     return meta;
   }
@@ -138,7 +196,6 @@ export class SkillStore {
     const skillDir = this.getSkillDir(meta.name);
     fs.rmSync(skillDir, { recursive: true, force: true });
 
-    this.save();
     log(`Removed skill "${meta.name}" (${id})`);
     return true;
   }
@@ -196,17 +253,25 @@ export class SkillStore {
     }
 
     const now = Date.now();
-    const meta: SkillMeta = {
+    const perMeta: PerSkillMeta = {
       id: nanoid(),
-      name,
       source,
       enabled: true,
       installedAt: now,
       updatedAt: now,
     };
+    this.writePerSkillMeta(destDir, perMeta);
+
+    const meta: SkillMeta = {
+      id: perMeta.id,
+      name,
+      source,
+      enabled: perMeta.enabled,
+      installedAt: now,
+      updatedAt: now,
+    };
 
     this.skills.push(meta);
-    this.save();
     log(`Added skill "${name}" (${meta.id}) from directory`);
     return meta;
   }
@@ -229,6 +294,15 @@ export class SkillStore {
   /** Validate that a name conforms to the skill naming rules. */
   static validateName(name: string): boolean {
     return /^[a-z][a-z0-9-]{0,63}$/.test(name);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Private helpers
+  // ---------------------------------------------------------------------------
+
+  private writePerSkillMeta(skillDir: string, meta: PerSkillMeta): void {
+    const metaPath = path.join(skillDir, ".meta.json");
+    fs.writeFileSync(metaPath, JSON.stringify(meta, null, 2), "utf-8");
   }
 }
 

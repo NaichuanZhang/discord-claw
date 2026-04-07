@@ -62,7 +62,7 @@ export interface SkillPatch {
   content?: string;
 }
 
-/** Lightweight persistence object stored in the skills data file. */
+/** Lightweight persistence object for per-skill metadata. */
 export interface SkillMeta {
   id: string;
   name: string;
@@ -70,10 +70,4 @@ export interface SkillMeta {
   enabled: boolean;
   installedAt: number;
   updatedAt: number;
-}
-
-/** Top-level shape of the persisted skills store. */
-export interface SkillsStoreData {
-  version: 1;
-  skills: SkillMeta[];
 }
