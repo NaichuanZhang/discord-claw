@@ -59,9 +59,31 @@ Bot: [evolve_merge] Merged and restarting... ✅
 | `/clear` | Reset conversation history in current session |
 | `/soul` | View or edit the bot's personality |
 
-## Quick Start
+## Getting Started
 
-### Discord Bot Setup
+Each instance of Discordclaw is its own bot with its own personality, memory, and evolution history. To run your own, you'll **fork the repo** and deploy from your fork. This way the self-evolution feature creates PRs against *your* repo, not the upstream one.
+
+### Prerequisites
+
+- **Node.js** v20+
+- **Git** and **GitHub CLI** (`gh`) — required for the self-evolution engine
+- A **Discord bot token** ([setup guide below](#1-create-a-discord-bot))
+- An **Anthropic API key** (or a proxy endpoint)
+- *(Optional)* An **OpenAI API key** for voice message transcription
+
+### 1. Fork & Clone
+
+1. Click **Fork** on [the repo](https://github.com/NaichuanZhang/discord-claw) to create your own copy
+2. Clone your fork:
+
+```bash
+git clone https://github.com/YOUR_USERNAME/discord-claw.git
+cd discord-claw
+```
+
+> **Why fork?** The evolution engine pushes branches and creates PRs via `gh`. If you clone without forking, PRs would target the original repo. Your fork gives you full control — the bot evolves *your* codebase.
+
+### 2. Create a Discord Bot
 
 1. Go to https://discord.com/developers/applications
 2. Create a new application → **Bot** tab → copy token
@@ -70,17 +92,72 @@ Bot: [evolve_merge] Merged and restarting... ✅
 5. Permissions: Send Messages, Read Message History, Add Reactions, Attach Files, Use Slash Commands
 6. Invite bot to your server with the generated URL
 
-### Install & Run
+### 3. Configure Environment
+
+```bash
+cp .env.example .env
+```
+
+Edit `.env` with your tokens:
+
+```env
+DISCORD_BOT_TOKEN=your_discord_bot_token
+ANTHROPIC_API_KEY=your_anthropic_api_key
+
+# Optional
+OPENAI_API_KEY=your_openai_key          # Voice message transcription
+GATEWAY_PORT=3000                        # Dashboard port
+GATEWAY_TOKEN=your_secret_token          # Dashboard auth token
+ANTHROPIC_MODEL=claude-sonnet-4-20250514 # Model override
+```
+
+### 4. Install & Run
 
 ```bash
 npm install
-cp .env.example .env    # Edit with your tokens
-npm run build:ui        # Build dashboard
-npm run dev             # Development
-./start.sh              # Production (auto-pull, migrations, health check, rollback)
+npm run build:ui    # Build the dashboard
+npm run dev         # Start in development mode
 ```
 
 The bot responds to **@mentions** in guild channels and all **DMs**. Dashboard at `http://localhost:3000`.
+
+### 5. Production Deployment
+
+For production, use the startup script which handles auto-pull, migrations, health checks, and rollback:
+
+```bash
+./start.sh
+```
+
+You can set up a systemd service, Docker container, or any process manager to keep it running. Point it at `start.sh` as the entry point.
+
+> **Tip:** Set `DISCORD_WEBHOOK_URL` in `.env` to receive deploy/rollback notifications in a Discord channel.
+
+### 6. Authenticate GitHub CLI (for Self-Evolution)
+
+The evolution engine uses `gh` to create and merge PRs. Make sure it's authenticated:
+
+```bash
+gh auth login
+```
+
+Without this, the bot can still function normally — it just won't be able to create PRs to modify its own code.
+
+### 7. Make It Yours
+
+- **Personality** — Edit `data/SOUL.md` to define how your bot talks and behaves. Hot-reloads on save.
+- **Skills** — Drop skill folders into `data/skills/` or install from GitHub via the dashboard.
+- **Memory** — The bot builds memory over time. You can also seed `data/MEMORY.md` with initial context.
+
+### Staying Up to Date
+
+To pull improvements from the upstream repo into your fork:
+
+```bash
+git remote add upstream https://github.com/NaichuanZhang/discord-claw.git
+git fetch upstream
+git merge upstream/main
+```
 
 ## Environment Variables
 
