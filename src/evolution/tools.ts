@@ -10,10 +10,12 @@ import {
   startEvolution,
   finalizeEvolution,
   cancelEvolution,
+  mergeEvolution,
   recordSuggestion,
   getBetaDir,
+  gh,
 } from "./engine.js";
-import { getActiveEvolution } from "./log.js";
+import { getActiveEvolution, getEvolution, listEvolutions } from "./log.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -135,6 +137,36 @@ export const evolutionTools = [
       type: "object" as const,
       properties: {},
       required: [],
+    },
+  },
+  {
+    name: "evolve_review",
+    description:
+      "Review a proposed evolution PR. Shows summary, changed files, and diff. If no id is provided, shows the most recent proposed evolution.",
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        id: {
+          type: "string",
+          description: "Evolution id to review. If omitted, reviews the most recent proposed evolution.",
+        },
+      },
+      required: [],
+    },
+  },
+  {
+    name: "evolve_merge",
+    description:
+      "Merge a proposed evolution PR and restart the bot to deploy the changes. The user must have reviewed the PR first via evolve_review.",
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        id: {
+          type: "string",
+          description: "Evolution id to merge",
+        },
+      },
+      required: ["id"],
     },
   },
 ];
@@ -321,6 +353,56 @@ export async function handleEvolutionTool(
         return JSON.stringify({
           success: true,
           message: `Evolution ${active.id} cancelled.`,
+        });
+      }
+
+      case "evolve_review": {
+        const id = input.id as string | undefined;
+        let evolution;
+        if (id) {
+          evolution = getEvolution(id);
+          if (!evolution) {
+            return JSON.stringify({ error: `Evolution not found: ${id}` });
+          }
+        } else {
+          const proposed = listEvolutions({ status: "proposed" });
+          if (proposed.length === 0) {
+            return JSON.stringify({ error: "No proposed evolutions to review." });
+          }
+          evolution = proposed[proposed.length - 1];
+        }
+
+        if (evolution.status !== "proposed" || !evolution.prNumber) {
+          return JSON.stringify({ error: `Evolution ${evolution.id} is not a proposed PR.` });
+        }
+
+        let diff = "";
+        try {
+          const { stdout } = await gh(["pr", "diff", String(evolution.prNumber)]);
+          diff = stdout.length > MAX_OUTPUT
+            ? stdout.slice(0, MAX_OUTPUT) + "\n... (truncated)"
+            : stdout;
+        } catch (err: any) {
+          diff = `(Failed to fetch diff: ${err.message})`;
+        }
+
+        return JSON.stringify({
+          id: evolution.id,
+          branch: evolution.branch,
+          summary: evolution.changesSummary,
+          pr_url: evolution.prUrl,
+          pr_number: evolution.prNumber,
+          files_changed: evolution.filesChanged,
+          diff,
+        });
+      }
+
+      case "evolve_merge": {
+        const id = input.id as string;
+        await mergeEvolution({ id, channelId: _currentChannelId });
+        return JSON.stringify({
+          success: true,
+          message: "PR merged. Restarting to deploy...",
         });
       }
 

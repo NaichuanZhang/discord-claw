@@ -7,6 +7,7 @@ import { promisify } from "node:util";
 import { existsSync, symlinkSync, rmSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { triggerRestart } from "../restart.js";
 import {
   createEvolution,
   getActiveEvolution,
@@ -50,7 +51,7 @@ async function git(
   return { stdout: stdout.trim(), stderr: stderr.trim() };
 }
 
-async function gh(
+export async function gh(
   args: string[],
   opts?: { cwd?: string },
 ): Promise<{ stdout: string; stderr: string }> {
@@ -306,6 +307,48 @@ export async function cancelEvolution(id: string): Promise<void> {
 
   updateEvolution(id, { status: "cancelled" });
   log(`Evolution ${id} cancelled`);
+}
+
+/**
+ * Merge a proposed evolution PR and trigger a restart to deploy it.
+ */
+export async function mergeEvolution(opts: {
+  id: string;
+  channelId?: string;
+}): Promise<void> {
+  const evolution = getEvolution(opts.id);
+  if (!evolution) {
+    throw new Error(`Evolution not found: ${opts.id}`);
+  }
+  if (evolution.status !== "proposed") {
+    throw new Error(`Evolution ${opts.id} is not in "proposed" status (current: ${evolution.status})`);
+  }
+  if (!evolution.prNumber) {
+    throw new Error(`Evolution ${opts.id} has no PR number`);
+  }
+
+  log(`Merging PR #${evolution.prNumber} for evolution ${opts.id}...`);
+  await gh(["pr", "merge", String(evolution.prNumber), "--squash", "--delete-branch"]);
+
+  updateEvolution(opts.id, {
+    status: "deployed",
+    deployedAt: Date.now(),
+  });
+
+  log(`Evolution ${opts.id} merged — triggering restart`);
+
+  if (_sendToDiscord && opts.channelId) {
+    try {
+      await _sendToDiscord(
+        opts.channelId,
+        `PR #${evolution.prNumber} merged. Restarting to deploy...`,
+      );
+    } catch (err) {
+      log("Failed to send Discord notification:", err);
+    }
+  }
+
+  triggerRestart();
 }
 
 /**

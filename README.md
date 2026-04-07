@@ -60,7 +60,7 @@ graph TB
     TL <-->|messages + tools| CLAUDE
     TL -->|memory_search, memory_get| MEM
     TL -->|send_message, send_file, add_reaction| CL
-    TL -->|evolve_start, evolve_write, evolve_propose| EVO
+    TL -->|evolve_start, evolve_write, evolve_propose, evolve_merge| EVO
     EVO -->|git worktree, gh pr create| GH[GitHub]
     EVO --> DB
     MH -->|log| DB
@@ -221,10 +221,17 @@ sequenceDiagram
 
     A->>U: "PR created: github.com/.../pull/N"
 
-    O->>GH: Review & merge PR
-    Note over GH,E: On next /restart
+    U->>A: "Show me the PR"
+    A->>E: evolve_review(id)
+    E->>GH: gh pr diff
+    E-->>A: summary + diff
+    A->>U: Shows changes for review
+
+    U->>A: "Merge it"
+    A->>E: evolve_merge(id)
+    E->>GH: gh pr merge --squash
+    E->>E: triggerRestart()
     E->>E: start.sh: git pull → migrate → build → start
-    E->>E: syncDeployedEvolutions()
     E->>E: Health check ✓ (or auto-rollback)
 ```
 
@@ -262,7 +269,7 @@ discordclaw/
 │   ├── evolution/             # Self-evolution system
 │   │   ├── engine.ts          # Git worktree lifecycle, PR creation via gh CLI
 │   │   ├── log.ts             # Evolution SQLite table + CRUD
-│   │   ├── tools.ts           # Agent tools: evolve_start/read/write/bash/propose/suggest/cancel
+│   │   ├── tools.ts           # Agent tools: evolve_start/read/write/bash/propose/suggest/cancel/review/merge
 │   │   └── health.ts          # /api/health endpoint for start.sh
 │   ├── db/
 │   │   └── index.ts           # SQLite schema, migrations, query helpers
@@ -357,6 +364,6 @@ The bot responds to **@mentions** in guild channels and all **DMs**. Dashboard a
 
 **File Attachments** — The agent can send files (PDFs, images, HTML, etc.) to Discord channels via the `send_file` tool. Files up to 25 MB are supported (Discord bot default tier).
 
-**Evolution Engine** — The bot can modify its own source code through GitHub pull requests. All changes are isolated in a git worktree at `beta/`, typechecked, and submitted as PRs via `gh` CLI. The agent has 7 evolution tools: `evolve_start`, `evolve_read`, `evolve_write`, `evolve_bash`, `evolve_propose`, `evolve_suggest`, and `evolve_cancel`. The bot also records ideas for improvements it can't yet make (`evolve_suggest`). Evolution history is tracked in SQLite and viewable in the dashboard. An idempotent startup script (`start.sh`) handles deploy: `git pull` → run migrations → build → start → health check → auto-rollback on failure.
+**Evolution Engine** — The bot can modify its own source code through GitHub pull requests. All changes are isolated in a git worktree at `beta/`, typechecked, and submitted as PRs via `gh` CLI. The agent has 9 evolution tools: `evolve_start`, `evolve_read`, `evolve_write`, `evolve_bash`, `evolve_propose`, `evolve_suggest`, `evolve_cancel`, `evolve_review`, and `evolve_merge`. Users can review PR diffs and merge directly from Discord — merging automatically triggers a restart to deploy the changes. The bot also records ideas for improvements it can't yet make (`evolve_suggest`). Evolution history is tracked in SQLite and viewable in the dashboard. An idempotent startup script (`start.sh`) handles deploy: `git pull` → run migrations → build → start → health check → auto-rollback on failure.
 
-**Restart** — The bot can restart itself via slash command. On restart, stale instances are automatically detected and killed to prevent duplicate bots.
+**Restart** — The bot can restart itself via slash command or automatically after merging an evolution PR. On restart, stale instances are automatically detected and killed to prevent duplicate bots.

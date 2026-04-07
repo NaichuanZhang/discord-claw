@@ -30,7 +30,7 @@ This is a Discord bot that uses Claude as its AI backend. The system has seven m
 
 **Cron service**: Scheduled tasks stored as JSON in `data/cron/`. Three schedule types: one-shot (`at`), interval (`every`), cron expression. Jobs can run agent turns and deliver results to Discord channels. Auto-disables after 3 consecutive failures.
 
-**Evolution engine**: Self-modification via GitHub PRs. `src/evolution/engine.ts` manages git worktrees at `beta/`, runs typecheck, pushes branches, and creates PRs via `gh` CLI. 7 agent tools (`evolve_start/read/write/bash/propose/suggest/cancel`). Evolution history tracked in SQLite `evolutions` table. On startup, `syncDeployedEvolutions()` checks if proposed PRs were merged. `start.sh` is the production entry point: pulls, runs idempotent migrations from `migrations/`, builds, starts, health-checks, and auto-rolls back on failure.
+**Evolution engine**: Self-modification via GitHub PRs. `src/evolution/engine.ts` manages git worktrees at `beta/`, runs typecheck, pushes branches, and creates PRs via `gh` CLI. 9 agent tools (`evolve_start/read/write/bash/propose/suggest/cancel/review/merge`). `evolve_review` shows PR diff and summary; `evolve_merge` merges the PR via `gh` and triggers an automatic restart to deploy. Evolution history tracked in SQLite `evolutions` table. On startup, `syncDeployedEvolutions()` checks if proposed PRs were merged. `start.sh` is the production entry point: pulls, runs idempotent migrations from `migrations/`, builds, starts, health-checks, and auto-rolls back on failure.
 
 **Gateway**: Express server + WebSocket at `/ws/logs` for real-time log streaming. REST API at `/api/*` exposes all subsystem CRUD including evolution history. React SPA dashboard served from `dist/ui/`.
 
