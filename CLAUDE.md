@@ -16,9 +16,11 @@ The dashboard SPA lives at `src/gateway/ui/` and builds to `dist/ui/`. Vite dev 
 
 ## Architecture
 
-This is a Discord bot that uses Claude as its AI backend. The system has seven major subsystems that initialize sequentially in `src/index.ts`:
+This is a Discord bot that uses Claude as its AI backend. The system has eight major subsystems that initialize sequentially in `src/index.ts`:
 
-**Bot → Agent → Claude API pipeline**: Discord messages flow through `bot/messages.ts` (filter, session resolve, context build) → `agent/agent.ts` (system prompt assembly, tool loop with duplicate detection) → Anthropic SDK. The agent returns an `AgentResponse` with text and extracted images (from markdown `![](url)` syntax). `messages.ts` renders images as Discord embeds (URLs) or attachments (local files). The agent has tools for memory search, Discord actions, skill reading, dangerous ops (bash, file I/O), and self-evolution (worktree + PR).
+**Bot → Agent → Claude API pipeline**: Discord messages flow through `bot/messages.ts` (filter, session resolve, voice transcription, context build) → `agent/agent.ts` (system prompt assembly, tool loop with duplicate detection) → Anthropic SDK. The agent returns an `AgentResponse` with text and extracted images (from markdown `![](url)` syntax). `messages.ts` renders images as Discord embeds (URLs) or attachments (local files). The agent has tools for memory search, Discord actions, skill reading, dangerous ops (bash, file I/O), and self-evolution (worktree + PR).
+
+**Voice message transcription**: `audio/transcribe.ts` handles Discord voice DMs. When a message has the `IsVoiceMessage` flag or audio attachments (.ogg, .mp3, .wav, etc.), `messages.ts` downloads the audio and sends it to OpenAI's Whisper API for transcription. The transcribed text is then passed to the agent as the message content. Requires `OPENAI_API_KEY`. Gracefully degrades if not configured.
 
 **Session management**: Sessions are keyed by thread/channel/user/DM combination. `agent/sessions.ts` resolves the correct session and loads history from SQLite. Sessions auto-expire based on `SESSION_TTL_HOURS`.
 
@@ -45,4 +47,4 @@ This is a Discord bot that uses Claude as its AI backend. The system has seven m
 
 ## Environment
 
-Requires either `ANTHROPIC_API_KEY` or `ANTHROPIC_BASE_URL` + `ANTHROPIC_AUTH_TOKEN` (for proxy). `DISCORD_BOT_TOKEN` is always required. See `.env.example`.
+Requires either `ANTHROPIC_API_KEY` or `ANTHROPIC_BASE_URL` + `ANTHROPIC_AUTH_TOKEN` (for proxy). `DISCORD_BOT_TOKEN` is always required. `OPENAI_API_KEY` is optional — enables voice message transcription via Whisper. See `.env.example`.

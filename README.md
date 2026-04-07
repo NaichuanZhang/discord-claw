@@ -9,6 +9,7 @@ A stripped-down Discord agent powered by Claude. Simplified fork of [openclaw](h
 ## Features
 
 - 💬 **Conversational AI** — @mention in channels or DM directly. Full conversation history per session.
+- 🎤 **Voice Message Support** — Send voice DMs and the bot transcribes them automatically via OpenAI Whisper.
 - 🧠 **Persistent Memory** — Remembers things across conversations. Markdown files indexed with FTS5 full-text search.
 - 🎭 **Customizable Personality** — Edit `SOUL.md` to change how the bot behaves. Hot-reloads on save.
 - 🔧 **Tool Use** — Runs shell commands, reads/writes files, sends messages across channels, reacts to messages, attaches files.
@@ -28,6 +29,11 @@ Bot: [searches memory] We discussed setting up the cron job
 You: Yeah, set it up for 9am every weekday in #general
 Bot: [creates cron job] Done! I'll post a standup prompt
      to #general at 9am Mon-Fri. ✅
+
+You: 🎤 [sends voice message]
+Bot: [transcribes audio] I heard you say "Can you search
+     for the latest Node.js release?" Let me check...
+     Node.js v22.5.0 was released on April 1, 2026.
 
 You: Can you search the web for the latest Node.js release?
 Bot: [reads searxng-search skill, runs search] Node.js v22.5.0
@@ -85,6 +91,7 @@ The bot responds to **@mentions** in guild channels and all **DMs**. Dashboard a
 | `ANTHROPIC_BASE_URL` | No | Proxy URL (overrides default API endpoint) |
 | `ANTHROPIC_AUTH_TOKEN` | No | Auth token for proxy (used instead of API key) |
 | `ANTHROPIC_MODEL` | No | Model name (default: `bedrock-claude-opus-4-6-1m`) |
+| `OPENAI_API_KEY` | No | OpenAI API key for voice message transcription (Whisper) |
 | `GATEWAY_PORT` | No | Dashboard port (default: `3000`) |
 | `SESSION_TTL_HOURS` | No | Session expiry (default: `24`) |
 | `DISCORD_WEBHOOK_URL` | No | Webhook for `start.sh` notifications (deploy, rollback alerts) |
@@ -110,6 +117,8 @@ The bot responds to **@mentions** in guild channels and all **DMs**. Dashboard a
 **File Attachments** — The agent can send files (PDFs, images, HTML, etc.) to Discord channels via the `send_file` tool. Files up to 25 MB are supported (Discord bot default tier).
 
 **Image Support** — When the agent's response contains markdown images (`![alt](url)`), they are automatically extracted and rendered as Discord embeds (for web URLs) or file attachments (for local files). Image markdown is stripped from the text to avoid showing raw URLs.
+
+**Voice Messages** — Discord voice DMs and audio attachments are automatically detected and transcribed using OpenAI's Whisper API. The transcribed text is passed to the agent as the message content. Requires `OPENAI_API_KEY`. Gracefully degrades with a helpful message if the API key isn't configured. Supports OGG, MP3, WAV, M4A, WebM, FLAC, and other common audio formats.
 
 **Evolution Engine** — The bot can modify its own source code through GitHub pull requests. All changes are isolated in a git worktree at `beta/`, typechecked, and submitted as PRs via `gh` CLI. The agent has 9 evolution tools: `evolve_start`, `evolve_read`, `evolve_write`, `evolve_bash`, `evolve_propose`, `evolve_suggest`, `evolve_cancel`, `evolve_review`, and `evolve_merge`. Users can review PR diffs and merge directly from Discord — merging automatically triggers a restart to deploy the changes. The bot also records ideas for improvements it can't yet make (`evolve_suggest`). Evolution history is tracked in SQLite and viewable in the dashboard. An idempotent startup script (`start.sh`) handles deploy: `git pull` → run migrations → build → start → health check → auto-rollback on failure.
 
@@ -143,6 +152,7 @@ graph TB
             SESS[Session Manager]
             CRON[Cron Service]
             EVO[Evolution Engine<br/>Self-Modification]
+            VOICE[Voice Transcription<br/>Whisper API]
         end
 
         subgraph Storage
@@ -158,13 +168,17 @@ graph TB
     end
 
     CLAUDE[Claude API]
+    OPENAI[OpenAI Whisper API]
 
-    DU <-->|messages| DG
+    DU <-->|messages + voice| DG
     DG <-->|events| CL
     CL --> MH
     CL --> SC
     MH --> SESS
     SESS --> DB
+    MH -->|voice messages| VOICE
+    VOICE <-->|transcribe| OPENAI
+    VOICE -->|text| MH
     MH --> PM
     PM --> SP
     SP --> SOUL
@@ -201,14 +215,22 @@ graph TB
 sequenceDiagram
     participant U as Discord User
     participant B as Bot
+    participant V as Voice Transcription
     participant S as Session Manager
     participant A as Agent
     participant C as Claude API
     participant M as Memory
     participant DB as SQLite
 
-    U->>B: @mention or DM
+    U->>B: @mention, DM, or voice message
     B->>B: Filter (bot? mention? enabled?)
+
+    opt Voice Message Detected
+        B->>V: transcribeAudio(attachment URL)
+        V->>V: Download OGG → Whisper API
+        V-->>B: transcribed text
+    end
+
     B->>S: resolveSession(channel, user)
     S->>DB: lookup / create session
     S-->>B: session + history
@@ -357,7 +379,7 @@ discordclaw/
 │   ├── restart.ts            # Shared restart trigger — avoids circular deps
 │   ├── bot/                   # Discord bot (discord.js v14)
 │   │   ├── client.ts          # Client setup, intents, event routing, DM raw fallback
-│   │   ├── messages.ts        # Message pipeline: filter → session → agent → reply (persistent typing)
+│   │   ├── messages.ts        # Message pipeline: filter → session → voice transcribe → agent → reply
 │   │   ├── commands.ts        # Slash commands: /help /config /sessions /clear /soul
 │   │   └── components.ts      # Button/select interaction handler
 │   ├── agent/                 # Claude integration
@@ -365,6 +387,8 @@ discordclaw/
 │   │   ├── tools.ts           # Discord tools (send_message, send_file, add_reaction, get_history)
 │   │   ├── dangerous-tools.ts # Powerful tools: bash, read_file, write_file
 │   │   └── sessions.ts        # Per-thread/DM session tracking + TTL
+│   ├── audio/                 # Voice message handling
+│   │   └── transcribe.ts      # Download + transcribe via OpenAI Whisper API
 │   ├── skills/                # Skills management (SDK pattern)
 │   │   ├── types.ts           # Skill, SkillMeta, SkillSource types
 │   │   ├── store.ts           # Filesystem-based discovery + per-skill .meta.json
@@ -402,7 +426,7 @@ discordclaw/
 │   └── .migrations/           # Marker files for completed migrations
 ├── migrations/                # Idempotent migration scripts (run by start.sh)
 ├── start.sh                   # Production startup: pull → migrate → build → start → health check
-├── .env                       # DISCORD_BOT_TOKEN, ANTHROPIC_* config
+├── .env                       # DISCORD_BOT_TOKEN, ANTHROPIC_* config, OPENAI_API_KEY
 ├── package.json
 ├── tsconfig.json
 └── vite.config.ts

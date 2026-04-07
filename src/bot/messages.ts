@@ -3,6 +3,7 @@ import {
   type Message as DiscordMessage,
   EmbedBuilder,
   AttachmentBuilder,
+  MessageFlags,
 } from "discord.js";
 import { existsSync } from "fs";
 import { basename } from "path";
@@ -12,6 +13,10 @@ import { resolveSession, getSessionHistory } from "../agent/sessions.js";
 import { getChannelConfig, addMessage } from "../db/index.js";
 import { broadcastLog } from "../gateway/server.js";
 import { isRestarting } from "../restart.js";
+import {
+  transcribeAudio,
+  isTranscriptionAvailable,
+} from "../audio/transcribe.js";
 
 // ---------------------------------------------------------------------------
 // Bot client reference (needed for mention checks)
@@ -95,6 +100,68 @@ function buildImageAttachments(images: AgentImage[]): AttachmentBuilder[] {
 }
 
 // ---------------------------------------------------------------------------
+// Voice message detection & transcription
+// ---------------------------------------------------------------------------
+
+/** Audio file extensions that we can transcribe. */
+const AUDIO_EXTENSIONS = /\.(ogg|mp3|wav|m4a|webm|mp4|mpeg|mpga|oga|flac)$/i;
+
+/**
+ * Check if a Discord message is a voice message.
+ * Discord voice messages have the IsVoiceMessage flag (8192) and
+ * include an audio attachment (typically .ogg).
+ */
+function isVoiceMessage(message: DiscordMessage): boolean {
+  return message.flags.has(MessageFlags.IsVoiceMessage);
+}
+
+/**
+ * Check if a message has audio attachments (even without the voice flag).
+ */
+function hasAudioAttachments(message: DiscordMessage): boolean {
+  return message.attachments.some((att) =>
+    AUDIO_EXTENSIONS.test(att.name || ""),
+  );
+}
+
+/**
+ * Attempt to transcribe audio attachments from a message.
+ * Returns transcribed text or null if transcription isn't possible.
+ */
+async function transcribeVoiceMessage(
+  message: DiscordMessage,
+): Promise<string | null> {
+  if (!isTranscriptionAvailable()) {
+    return null;
+  }
+
+  // Get audio attachments
+  const audioAttachments = message.attachments.filter((att) =>
+    AUDIO_EXTENSIONS.test(att.name || ""),
+  );
+
+  if (audioAttachments.size === 0) return null;
+
+  const transcriptions: string[] = [];
+
+  for (const [, attachment] of audioAttachments) {
+    try {
+      const text = await transcribeAudio(attachment.url, attachment.name);
+      if (text) {
+        transcriptions.push(text);
+      }
+    } catch (err) {
+      console.error(
+        `[bot] Failed to transcribe attachment ${attachment.name}:`,
+        err,
+      );
+    }
+  }
+
+  return transcriptions.length > 0 ? transcriptions.join("\n") : null;
+}
+
+// ---------------------------------------------------------------------------
 // Main message handler
 // ---------------------------------------------------------------------------
 
@@ -106,10 +173,15 @@ export async function handleMessage(message: DiscordMessage): Promise<void> {
   if (message.author.bot) return;
 
   const isDM = message.channel.isDMBased();
+  const isVoice = isVoiceMessage(message);
+  const hasAudio = hasAudioAttachments(message);
 
-  console.log(`[bot] Message from ${message.author.tag} isDM=${isDM} content="${message.content.slice(0, 80)}"`);
+  console.log(
+    `[bot] Message from ${message.author.tag} isDM=${isDM} isVoice=${isVoice} hasAudio=${hasAudio} content="${message.content.slice(0, 80)}"`,
+  );
 
   // 2. Filter: in guild channels, only respond when mentioned
+  //    Exception: voice messages in DMs always get processed
   if (!isDM) {
     const botUser = botClient?.user;
     if (!botUser) {
@@ -127,9 +199,11 @@ export async function handleMessage(message: DiscordMessage): Promise<void> {
   if (channelConfig?.enabled === false) return;
 
   // 4. Session resolve
-  const isThread = "isThread" in message.channel && typeof message.channel.isThread === "function"
-    ? message.channel.isThread()
-    : false;
+  const isThread =
+    "isThread" in message.channel &&
+    typeof message.channel.isThread === "function"
+      ? message.channel.isThread()
+      : false;
 
   const session = resolveSession({
     threadId: isThread ? message.channel.id : undefined,
@@ -143,15 +217,51 @@ export async function handleMessage(message: DiscordMessage): Promise<void> {
   const history = getSessionHistory(session.id);
 
   // Strip bot mention from content before sending to the agent
-  const cleanContent = message.content.replace(/<@!?\d+>/g, "").trim();
+  let cleanContent = message.content.replace(/<@!?\d+>/g, "").trim();
+
+  // 5b. Handle voice messages — transcribe audio and use as message content
+  if (isVoice || hasAudio) {
+    // Show typing while we transcribe
+    if ("sendTyping" in message.channel) {
+      message.channel.sendTyping().catch(() => {});
+    }
+
+    const transcript = await transcribeVoiceMessage(message);
+
+    if (transcript) {
+      console.log(
+        `[bot] Voice transcription: "${transcript.slice(0, 100)}${transcript.length > 100 ? "..." : ""}"`,
+      );
+
+      // Combine any text content with the transcription
+      if (cleanContent) {
+        cleanContent = `${cleanContent}\n\n[Voice message transcription]: ${transcript}`;
+      } else {
+        cleanContent = transcript;
+      }
+    } else if (!cleanContent) {
+      // No transcription available and no text content
+      if (!isTranscriptionAvailable()) {
+        await message.reply(
+          "🎤 I can see you sent a voice message, but voice transcription isn't configured yet. Ask an admin to set the `OPENAI_API_KEY` environment variable to enable it!",
+        );
+      } else {
+        await message.reply(
+          "🎤 I couldn't transcribe your voice message. Please try again or type your message instead.",
+        );
+      }
+      return;
+    }
+  }
 
   if (!cleanContent) return; // Nothing left after stripping mentions
 
   // Resolve context details
   const guildName = message.guild?.name;
-  const channelName = "name" in message.channel && message.channel.name
-    ? message.channel.name
-    : "DM";
+  const channelName =
+    "name" in message.channel && message.channel.name
+      ? message.channel.name
+      : "DM";
 
   // 6. Show typing indicator — refresh every 8s (Discord typing expires after ~10s)
   let typingInterval: ReturnType<typeof setInterval> | null = null;
@@ -159,7 +269,9 @@ export async function handleMessage(message: DiscordMessage): Promise<void> {
     if (!("sendTyping" in message.channel)) return;
     message.channel.sendTyping().catch(() => {});
     typingInterval = setInterval(() => {
-      (message.channel as { sendTyping: () => Promise<void> }).sendTyping().catch(() => {});
+      (
+        message.channel as { sendTyping: () => Promise<void> }
+      ).sendTyping().catch(() => {});
     }, 8_000);
   };
   const stopTyping = () => {
@@ -189,9 +301,13 @@ export async function handleMessage(message: DiscordMessage): Promise<void> {
     stopTyping();
 
     // 8. Log both messages to DB (store the full text with images for history)
-    const fullResponseText = response.text +
+    const fullResponseText =
+      response.text +
       (response.images.length > 0
-        ? "\n" + response.images.map((img) => `![${img.alt || ""}](${img.source})`).join("\n")
+        ? "\n" +
+          response.images
+            .map((img) => `![${img.alt || ""}](${img.source})`)
+            .join("\n")
         : "");
 
     addMessage({
@@ -269,7 +385,7 @@ export async function handleMessage(message: DiscordMessage): Promise<void> {
 
     const imageCount = response.images.length;
     console.log(
-      `[bot] Replied to ${message.author.tag} in ${channelName} (session ${session.id})${imageCount > 0 ? ` with ${imageCount} image(s)` : ""}`,
+      `[bot] Replied to ${message.author.tag} in ${channelName} (session ${session.id})${imageCount > 0 ? ` with ${imageCount} image(s)` : ""}${isVoice ? " [voice]" : ""}`,
     );
   } catch (err) {
     stopTyping();
