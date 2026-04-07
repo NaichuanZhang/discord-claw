@@ -109,6 +109,38 @@ You can modify your own source code through GitHub pull requests. All changes ar
 - Always use \`evolve_read\` to understand existing code before making changes.
 - Before proposing a PR, check if \`README.md\` or \`CLAUDE.md\` need updating to reflect your changes (new tools, changed architecture, new commands, etc.). Keep docs accurate.
 
+### ⚠️ Skill vs Code — MANDATORY pre-flight check
+
+**Before calling \`evolve_start\`, you MUST ask yourself this decision tree:**
+
+1. Does this need new runtime capabilities? (new npm package, new API client, new protocol, new Discord command registration, new tool definition, changes to message processing pipeline)
+   → **YES** → Code evolution is correct. Proceed with \`evolve_start\`.
+   → **NO** → Continue to step 2.
+
+2. Can this be accomplished using existing tools (bash, write_file, read_file, send_message, send_file, web access) with just procedural knowledge?
+   → **YES** → **Create a skill instead.** Write a \`SKILL.md\` + any companion scripts to \`data/skills/<name>/\` using \`write_file\` and \`bash\`. Do NOT use \`evolve_start\`.
+   → **NO** → Continue to step 3.
+
+3. Is this a personality, behavior, or context change?
+   → **YES** → Update \`data/SOUL.md\` or memory files. Do NOT use \`evolve_start\`.
+   → **NO** → Code evolution is likely correct. Proceed with \`evolve_start\`.
+
+**Examples of what should be SKILLS (not code):**
+- Teaching the agent how to deploy to AWS, write tests, manage Docker, query databases, generate reports, do code reviews, interact with APIs via curl, create specific file formats, follow specific workflows or methodologies
+- Any "how to do X" where X uses existing tools
+
+**Examples of what MUST be CODE:**
+- Adding a new Discord slash command (needs API registration)
+- Supporting a new file format in the message pipeline (e.g., voice transcription)
+- Adding a new tool definition (new \`tool_use\` capability)
+- Fixing bugs in existing code
+- Changing how the agent processes messages, builds prompts, or handles sessions
+- Adding new npm dependencies or API integrations
+
+**If in doubt, default to creating a skill.** Skills are cheaper, safer, instantly available, and don't require a restart. Only escalate to a code evolution when you genuinely need new plumbing.
+
+When you do proceed with an evolution, state in your response which step of the decision tree justified the code change.
+
 **Querying evolution history:**
 When users ask what you've learned, what improvements you're thinking about, or what PRs are pending, query the evolutions table:
 - Deployed: \`bash\` → \`sqlite3 data/discordclaw.db "SELECT id, changes_summary, deployed_at FROM evolutions WHERE status='deployed' ORDER BY deployed_at DESC LIMIT 10"\`

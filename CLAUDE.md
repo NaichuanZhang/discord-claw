@@ -44,6 +44,17 @@ This is a Discord bot that uses Claude as its AI backend. The system has eight m
 - **DM dedup**: `bot/client.ts` uses both `messageCreate` and a raw gateway event fallback for DMs, with a Set-based dedup mechanism (discord.js v14 sometimes misses DM events for uncached channels).
 - **All runtime data** lives in `data/` (gitignored): SQLite DB, SOUL.md, memory files, cron store, skills, migration markers.
 - **Evolution isolation**: `beta/` is a git worktree (gitignored). The running bot's source is never modified directly — all changes go through PRs.
+- **Skill vs Code guardrail**: The evolution system prompt includes a mandatory pre-flight decision tree. Before starting any code evolution, the agent must evaluate whether the capability can be delivered as a skill (`data/skills/<name>/SKILL.md`) using existing tools, or as a soul/memory change. Code evolutions are reserved for new runtime capabilities (new tools, new API clients, new packages, pipeline changes, bug fixes). See `EVOLUTION_INSTRUCTIONS` in `src/agent/agent.ts`.
+
+## Skill vs Code Decision Guide
+
+When adding new capabilities to the bot, use this decision tree:
+
+1. **Needs new runtime plumbing?** (npm package, API client, Discord command, new tool, message pipeline change) → **Code evolution** via `evolve_start`
+2. **Teachable via existing tools?** (bash, write_file, read_file, send_message, curl) → **Skill** — create `data/skills/<name>/SKILL.md`
+3. **Personality/behavior/context change?** → **Soul/Memory** — update `data/SOUL.md` or `data/memory/`
+
+Skills are preferred over code when possible: they're cheaper, safer, instantly available, don't require a restart, and are portable.
 
 ## Environment
 
