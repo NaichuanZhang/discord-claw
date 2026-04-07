@@ -5,7 +5,7 @@ import {
   EmbedBuilder,
 } from "discord.js";
 import { listSessions, clearSession, resolveSession } from "../agent/sessions.js";
-import { getChannelConfig, setChannelConfig } from "../db/index.js";
+import { getChannelConfig, setChannelConfig, getDb } from "../db/index.js";
 import { getSoul } from "../soul/soul.js";
 import { triggerRestart } from "../restart.js";
 import { handleComponentInteraction } from "./components.js";
@@ -22,10 +22,20 @@ export function setCommandsSkillService(service: SkillService): void {
 }
 
 // ---------------------------------------------------------------------------
+// Boot timestamp for uptime calculation
+// ---------------------------------------------------------------------------
+
+const bootTime = Date.now();
+
+// ---------------------------------------------------------------------------
 // Slash command definitions
 // ---------------------------------------------------------------------------
 
 export const slashCommands: ApplicationCommandData[] = [
+  {
+    name: "ping",
+    description: "Show bot health status, latency, and uptime",
+  },
   {
     name: "help",
     description: "Show bot capabilities and usage info",
@@ -157,6 +167,9 @@ export async function handleInteraction(interaction: Interaction): Promise<void>
 
   try {
     switch (commandName) {
+      case "ping":
+        await handlePing(interaction);
+        break;
       case "help":
         await handleHelp(interaction);
         break;
@@ -197,6 +210,85 @@ export async function handleInteraction(interaction: Interaction): Promise<void>
 }
 
 // ---------------------------------------------------------------------------
+// /ping
+// ---------------------------------------------------------------------------
+
+function formatUptime(ms: number): string {
+  const seconds = Math.floor(ms / 1000);
+  const days = Math.floor(seconds / 86400);
+  const hours = Math.floor((seconds % 86400) / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  const secs = seconds % 60;
+
+  const parts: string[] = [];
+  if (days > 0) parts.push(`${days}d`);
+  if (hours > 0) parts.push(`${hours}h`);
+  if (minutes > 0) parts.push(`${minutes}m`);
+  parts.push(`${secs}s`);
+  return parts.join(" ");
+}
+
+async function handlePing(
+  interaction: import("discord.js").ChatInputCommandInteraction,
+): Promise<void> {
+  const client = interaction.client;
+
+  // WebSocket heartbeat latency
+  const wsLatency = client.ws.ping;
+
+  // Uptime
+  const uptime = Date.now() - bootTime;
+
+  // Health checks
+  const dbOk = (() => {
+    try {
+      getDb().prepare("SELECT 1").get();
+      return true;
+    } catch {
+      return false;
+    }
+  })();
+
+  const discordOk = client.ws.status === 0;
+  const allHealthy = dbOk && discordOk;
+
+  const statusEmoji = allHealthy ? "🟢" : "🔴";
+  const statusText = allHealthy ? "All systems operational" : "Degraded";
+
+  const embed = new EmbedBuilder()
+    .setTitle(`${statusEmoji} Bot Status`)
+    .addFields(
+      {
+        name: "Latency",
+        value: `🏓 **${wsLatency}ms** (WebSocket)`,
+        inline: true,
+      },
+      {
+        name: "Uptime",
+        value: `⏱️ ${formatUptime(uptime)}`,
+        inline: true,
+      },
+      {
+        name: "Health",
+        value: [
+          `${dbOk ? "✅" : "❌"} Database`,
+          `${discordOk ? "✅" : "❌"} Discord Gateway`,
+        ].join("\n"),
+        inline: false,
+      },
+      {
+        name: "Status",
+        value: statusText,
+        inline: false,
+      },
+    )
+    .setColor(allHealthy ? 0x57f287 : 0xed4245)
+    .setTimestamp();
+
+  await interaction.reply({ embeds: [embed] });
+}
+
+// ---------------------------------------------------------------------------
 // /help
 // ---------------------------------------------------------------------------
 
@@ -215,6 +307,7 @@ async function handleHelp(
       {
         name: "Commands",
         value: [
+          "`/ping` — Show bot health status",
           "`/help` — Show this message",
           "`/config show` — View channel configuration",
           "`/config set-prompt <prompt>` — Set a channel system prompt",
