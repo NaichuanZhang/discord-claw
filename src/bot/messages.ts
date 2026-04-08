@@ -11,6 +11,7 @@ import { processMessage } from "../agent/agent.js";
 import type { AgentResponse, AgentImage } from "../agent/agent.js";
 import { resolveSession, getSessionHistory } from "../agent/sessions.js";
 import { getChannelConfig, addMessage } from "../db/index.js";
+import type { TokenUsage } from "../db/index.js";
 import { broadcastLog } from "../gateway/server.js";
 import { isRestarting } from "../restart.js";
 import {
@@ -98,6 +99,54 @@ function buildImageAttachments(images: AgentImage[]): AttachmentBuilder[] {
     const name = basename(img.source);
     return new AttachmentBuilder(img.source, { name, description: img.alt });
   });
+}
+
+// ---------------------------------------------------------------------------
+// Token cost formatting
+// ---------------------------------------------------------------------------
+
+/** Per-million-token pricing by model prefix. Extend as needed. */
+interface ModelPricing {
+  input: number;
+  output: number;
+  cacheRead: number;
+  cacheCreation: number;
+}
+
+const DEFAULT_PRICING: ModelPricing = {
+  input: 3.0,
+  output: 15.0,
+  cacheRead: 0.30,
+  cacheCreation: 3.75,
+};
+
+/**
+ * Format token usage as a single-line cost string.
+ * Example: `📊 opus-4 · 28.9k in / 450 out · $0.0938`
+ */
+function formatUsageLine(usage: TokenUsage): string {
+  const pricing = DEFAULT_PRICING;
+
+  const cost =
+    (usage.inputTokens * pricing.input +
+      usage.outputTokens * pricing.output +
+      usage.cacheReadTokens * pricing.cacheRead +
+      usage.cacheCreationTokens * pricing.cacheCreation) /
+    1_000_000;
+
+  const fmtTokens = (n: number): string => {
+    if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+    if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`;
+    return String(n);
+  };
+
+  // Shorten model name for display
+  const shortModel = usage.model
+    .replace(/^bedrock-/, "")
+    .replace(/-\d{8}$/, "")
+    .replace(/-\d+[km]$/, "");
+
+  return `-# 📊 ${shortModel} · ${fmtTokens(usage.inputTokens)} in / ${fmtTokens(usage.outputTokens)} out · $${cost.toFixed(4)}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -383,6 +432,12 @@ export async function handleMessage(message: DiscordMessage): Promise<void> {
       if (embeds.length > 0) replyPayload.embeds = embeds;
       if (files.length > 0) replyPayload.files = files;
       await message.reply(replyPayload);
+    }
+
+    // 11. Send token cost line as a follow-up message
+    if (response.usage && "send" in message.channel) {
+      const costLine = formatUsageLine(response.usage);
+      await message.channel.send(costLine);
     }
 
     const imageCount = response.images.length;
