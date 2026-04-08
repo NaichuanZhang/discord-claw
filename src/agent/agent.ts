@@ -5,7 +5,7 @@ import { discordTools, handleDiscordTool } from "./tools.js";
 import { skillTools, handleSkillTool } from "../skills/tools.js";
 import { dangerousTools, handleDangerousTool } from "./dangerous-tools.js";
 import { evolutionTools, handleEvolutionTool, setEvolutionContext } from "../evolution/tools.js";
-import type { Message, ChannelConfig } from "../db/index.js";
+import type { Message, ChannelConfig, TokenUsage } from "../db/index.js";
 import { recordSignal } from "../reflection/signals.js";
 import { getSkillService } from "../skills/service.js";
 
@@ -36,6 +36,8 @@ export interface AgentResponse {
   text: string;
   /** Images extracted from the response */
   images: AgentImage[];
+  /** Aggregated token usage across all API calls in this turn */
+  usage?: TokenUsage;
 }
 
 // ---------------------------------------------------------------------------
@@ -54,6 +56,33 @@ function cleanModelName(s: string): string {
 function getModel(override?: string): string {
   const raw = override || process.env.ANTHROPIC_MODEL || DEFAULT_MODEL;
   return cleanModelName(raw);
+}
+
+// ---------------------------------------------------------------------------
+// Token usage aggregation
+// ---------------------------------------------------------------------------
+
+function aggregateUsage(
+  existing: TokenUsage | undefined,
+  response: Anthropic.Messages.Message,
+  model: string,
+): TokenUsage {
+  const usage = response.usage;
+  const prev = existing ?? {
+    model,
+    inputTokens: 0,
+    outputTokens: 0,
+    cacheCreationTokens: 0,
+    cacheReadTokens: 0,
+  };
+
+  return {
+    model, // Use the latest model (should be consistent within a session)
+    inputTokens: prev.inputTokens + (usage.input_tokens ?? 0),
+    outputTokens: prev.outputTokens + (usage.output_tokens ?? 0),
+    cacheCreationTokens: prev.cacheCreationTokens + (usage.cache_creation_input_tokens ?? 0),
+    cacheReadTokens: prev.cacheReadTokens + (usage.cache_read_input_tokens ?? 0),
+  };
 }
 
 /** Get the current date/time as a human-readable string for the system prompt. */
@@ -388,6 +417,8 @@ export async function processMessage(opts: {
 
   const collectedText: string[] = [];
   let turns = 0;
+  let totalUsage: TokenUsage | undefined;
+  const model = getModel();
 
   // Duplicate tool call detection — track previous turn's calls
   let prevCallSignatures: string[] = [];
@@ -397,12 +428,15 @@ export async function processMessage(opts: {
     turns++;
 
     const response = await client.messages.create({
-      model: getModel(),
+      model,
       max_tokens: MAX_TOKENS,
       system: systemPrompt,
       messages,
       tools: allTools,
     });
+
+    // Aggregate token usage
+    totalUsage = aggregateUsage(totalUsage, response, response.model);
 
     // Collect text blocks from the response
     for (const block of response.content) {
@@ -465,11 +499,15 @@ export async function processMessage(opts: {
       });
       // One final turn without tools to force a text response
       const final = await client.messages.create({
-        model: getModel(),
+        model,
         max_tokens: MAX_TOKENS,
         system: systemPrompt,
         messages,
       });
+
+      // Aggregate usage from the final call too
+      totalUsage = aggregateUsage(totalUsage, final, final.model);
+
       for (const block of final.content) {
         if (block.type === "text") {
           collectedText.push(block.text);
@@ -504,7 +542,7 @@ export async function processMessage(opts: {
 
   const rawText = collectedText.join("\n").trim();
   if (!rawText) {
-    return { text: "I processed your request but had nothing to say.", images: [] };
+    return { text: "I processed your request but had nothing to say.", images: [], usage: totalUsage };
   }
 
   // Extract images from the response text
@@ -513,6 +551,7 @@ export async function processMessage(opts: {
   return {
     text: cleanText || rawText, // Fall back to raw if extraction stripped everything
     images,
+    usage: totalUsage,
   };
 }
 

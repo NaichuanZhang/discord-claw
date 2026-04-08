@@ -25,6 +25,20 @@ export interface Message {
   content: string;
   discordMessageId?: string;
   createdAt: number;
+  // Token usage (populated for assistant messages)
+  model?: string;
+  inputTokens?: number;
+  outputTokens?: number;
+  cacheCreationTokens?: number;
+  cacheReadTokens?: number;
+}
+
+export interface TokenUsage {
+  model: string;
+  inputTokens: number;
+  outputTokens: number;
+  cacheCreationTokens: number;
+  cacheReadTokens: number;
 }
 
 export interface ChannelConfig {
@@ -89,7 +103,12 @@ export function initDb(): void {
       role TEXT NOT NULL,
       content TEXT NOT NULL,
       discord_message_id TEXT,
-      created_at INTEGER NOT NULL
+      created_at INTEGER NOT NULL,
+      model TEXT,
+      input_tokens INTEGER,
+      output_tokens INTEGER,
+      cache_creation_tokens INTEGER,
+      cache_read_tokens INTEGER
     );
 
     CREATE TABLE IF NOT EXISTS channel_configs (
@@ -185,6 +204,11 @@ function rowToMessage(row: Record<string, unknown>): Message {
     content: row.content as string,
     discordMessageId: (row.discord_message_id as string) ?? undefined,
     createdAt: row.created_at as number,
+    model: (row.model as string) ?? undefined,
+    inputTokens: (row.input_tokens as number) ?? undefined,
+    outputTokens: (row.output_tokens as number) ?? undefined,
+    cacheCreationTokens: (row.cache_creation_tokens as number) ?? undefined,
+    cacheReadTokens: (row.cache_read_tokens as number) ?? undefined,
   };
 }
 
@@ -272,13 +296,25 @@ export function addMessage(opts: {
   role: string;
   content: string;
   discordMessageId?: string;
+  usage?: TokenUsage;
 }): void {
   getDb()
     .prepare(
-      `INSERT INTO messages (session_id, role, content, discord_message_id, created_at)
-       VALUES (?, ?, ?, ?, ?)`
+      `INSERT INTO messages (session_id, role, content, discord_message_id, created_at, model, input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
-    .run(opts.sessionId, opts.role, opts.content, opts.discordMessageId ?? null, Date.now());
+    .run(
+      opts.sessionId,
+      opts.role,
+      opts.content,
+      opts.discordMessageId ?? null,
+      Date.now(),
+      opts.usage?.model ?? null,
+      opts.usage?.inputTokens ?? null,
+      opts.usage?.outputTokens ?? null,
+      opts.usage?.cacheCreationTokens ?? null,
+      opts.usage?.cacheReadTokens ?? null,
+    );
 }
 
 // ---------------------------------------------------------------------------

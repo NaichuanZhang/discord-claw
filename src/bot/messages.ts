@@ -285,7 +285,7 @@ export async function handleMessage(message: DiscordMessage): Promise<void> {
   startTyping();
 
   try {
-    // 7. Agent dispatch — now returns AgentResponse with text + images
+    // 7. Agent dispatch — now returns AgentResponse with text + images + usage
     const response: AgentResponse = await processMessage({
       message: cleanContent,
       sessionId: session.id,
@@ -322,6 +322,7 @@ export async function handleMessage(message: DiscordMessage): Promise<void> {
       sessionId: session.id,
       role: "assistant",
       content: fullResponseText,
+      usage: response.usage,
     });
 
     // 8b. Broadcast to WebSocket log viewers
@@ -385,6 +386,13 @@ export async function handleMessage(message: DiscordMessage): Promise<void> {
     }
 
     const imageCount = response.images.length;
+    // Log usage info
+    if (response.usage) {
+      const u = response.usage;
+      console.log(
+        `[bot] Usage: model=${u.model} in=${u.inputTokens} out=${u.outputTokens} cache_create=${u.cacheCreationTokens} cache_read=${u.cacheReadTokens}`,
+      );
+    }
     console.log(
       `[bot] Replied to ${message.author.tag} in ${channelName} (session ${session.id})${imageCount > 0 ? ` with ${imageCount} image(s)` : ""}${isVoice ? " [voice]" : ""}`,
     );
