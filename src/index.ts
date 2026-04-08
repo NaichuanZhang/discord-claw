@@ -22,6 +22,9 @@ import {
   setReflectionChannelId,
 } from "./reflection/daemon.js";
 
+// Admin user ID for DM fallback delivery
+const ADMIN_USER_ID = "152801068663832576";
+
 // ---------------------------------------------------------------------------
 // Startup
 // ---------------------------------------------------------------------------
@@ -77,6 +80,16 @@ async function main(): Promise<void> {
     const prefix = mentionUser ? `<@${mentionUser}> ` : "";
     await channel.send(prefix + text);
   });
+
+  // Wire cron → admin DM fallback
+  try {
+    const adminUser = await client.users.fetch(ADMIN_USER_ID);
+    const dmChannel = await adminUser.createDM();
+    cronService.setAdminDmChannelId(dmChannel.id);
+    console.log(`[discordclaw] Admin DM fallback channel: ${dmChannel.id}`);
+  } catch (err) {
+    console.warn("[discordclaw] Could not set up admin DM fallback for cron:", err);
+  }
 
   // Wire evolution → Discord delivery
   setEvolutionSendToDiscord(async (channelId, text) => {

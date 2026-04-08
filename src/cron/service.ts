@@ -24,6 +24,7 @@ export class CronService {
   private executeAgentTurn:
     | ((message: string, model?: string) => Promise<string>)
     | null = null;
+  private adminDmChannelId: string | null = null;
 
   constructor() {
     this.store = new CronStore();
@@ -80,6 +81,15 @@ export class CronService {
   ): void {
     this.executeAgentTurn = fn;
     log("Agent turn callback registered");
+  }
+
+  /**
+   * Set the admin's DM channel ID as a fallback delivery target.
+   * When a job has no `delivery` configured, output will be sent here.
+   */
+  setAdminDmChannelId(channelId: string): void {
+    this.adminDmChannelId = channelId;
+    log(`Admin DM fallback set: ${channelId}`);
   }
 
   // ---------------------------------------------------------------------------
@@ -233,6 +243,25 @@ export class CronService {
   }
 
   // ---------------------------------------------------------------------------
+  // Delivery target resolution
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Resolve the delivery channel for a job.
+   * Falls back to admin DM if no delivery is configured.
+   */
+  private resolveDelivery(job: CronJob): { channelId: string; mentionUser?: string } | null {
+    if (job.delivery) {
+      return job.delivery;
+    }
+    // Fallback: deliver to admin DM
+    if (this.adminDmChannelId) {
+      return { channelId: this.adminDmChannelId };
+    }
+    return null;
+  }
+
+  // ---------------------------------------------------------------------------
   // Job execution
   // ---------------------------------------------------------------------------
 
@@ -259,17 +288,20 @@ export class CronService {
         );
       }
 
-      // Deliver result to Discord if delivery is configured
-      if (job.delivery && result !== undefined) {
+      // Deliver result to Discord — use configured delivery or fall back to admin DM
+      const delivery = this.resolveDelivery(job);
+      if (delivery && result !== undefined) {
         if (this.sendToDiscord) {
           await this.sendToDiscord(
-            job.delivery.channelId,
+            delivery.channelId,
             result,
-            job.delivery.mentionUser,
+            delivery.mentionUser,
           );
         } else {
-          log(`Warning: delivery configured for job ${job.id} but no Discord send callback`);
+          log(`Warning: delivery target available for job ${job.id} but no Discord send callback`);
         }
+      } else if (result !== undefined && !delivery) {
+        log(`Warning: job ${job.id} produced output but no delivery target and no admin DM fallback`);
       }
 
       // Update state on success
