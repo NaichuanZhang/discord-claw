@@ -10,15 +10,22 @@ import { getSoul } from "../soul/soul.js";
 import { triggerRestart } from "../restart.js";
 import { handleComponentInteraction } from "./components.js";
 import type { SkillService } from "../skills/service.js";
+import type { CronService } from "../cron/service.js";
+import type { CronJob, CronSchedule, CronPayload, CronDelivery } from "../cron/types.js";
 
 // ---------------------------------------------------------------------------
-// SkillService reference (set from index.ts after init)
+// Service references (set from index.ts after init)
 // ---------------------------------------------------------------------------
 
 let skillService: SkillService | null = null;
+let cronService: CronService | null = null;
 
 export function setCommandsSkillService(service: SkillService): void {
   skillService = service;
+}
+
+export function setCommandsCronService(service: CronService): void {
+  cronService = service;
 }
 
 // ---------------------------------------------------------------------------
@@ -147,6 +154,138 @@ export const slashCommands: ApplicationCommandData[] = [
       },
     ],
   },
+  {
+    name: "cron",
+    description: "View and manage scheduled cron jobs",
+    options: [
+      {
+        name: "list",
+        description: "List all cron jobs",
+        type: ApplicationCommandOptionType.Subcommand,
+      },
+      {
+        name: "show",
+        description: "Show details for a specific cron job",
+        type: ApplicationCommandOptionType.Subcommand,
+        options: [
+          {
+            name: "id",
+            description: "Job ID",
+            type: ApplicationCommandOptionType.String,
+            required: true,
+          },
+        ],
+      },
+      {
+        name: "add",
+        description: "Add a new cron job",
+        type: ApplicationCommandOptionType.Subcommand,
+        options: [
+          {
+            name: "name",
+            description: "Job name",
+            type: ApplicationCommandOptionType.String,
+            required: true,
+          },
+          {
+            name: "schedule",
+            description: "Cron expression (e.g. '0 9 * * *') or interval (e.g. 'every 30m')",
+            type: ApplicationCommandOptionType.String,
+            required: true,
+          },
+          {
+            name: "message",
+            description: "Agent prompt message to execute on each run",
+            type: ApplicationCommandOptionType.String,
+            required: true,
+          },
+          {
+            name: "channel",
+            description: "Channel to deliver results to (defaults to current)",
+            type: ApplicationCommandOptionType.Channel,
+            required: false,
+          },
+          {
+            name: "timezone",
+            description: "Timezone for cron expression (e.g. America/Los_Angeles)",
+            type: ApplicationCommandOptionType.String,
+            required: false,
+          },
+        ],
+      },
+      {
+        name: "remove",
+        description: "Remove a cron job",
+        type: ApplicationCommandOptionType.Subcommand,
+        options: [
+          {
+            name: "id",
+            description: "Job ID to remove",
+            type: ApplicationCommandOptionType.String,
+            required: true,
+          },
+        ],
+      },
+      {
+        name: "enable",
+        description: "Enable a disabled cron job",
+        type: ApplicationCommandOptionType.Subcommand,
+        options: [
+          {
+            name: "id",
+            description: "Job ID to enable",
+            type: ApplicationCommandOptionType.String,
+            required: true,
+          },
+        ],
+      },
+      {
+        name: "disable",
+        description: "Disable a cron job",
+        type: ApplicationCommandOptionType.Subcommand,
+        options: [
+          {
+            name: "id",
+            description: "Job ID to disable",
+            type: ApplicationCommandOptionType.String,
+            required: true,
+          },
+        ],
+      },
+      {
+        name: "run",
+        description: "Force-run a cron job immediately",
+        type: ApplicationCommandOptionType.Subcommand,
+        options: [
+          {
+            name: "id",
+            description: "Job ID to run",
+            type: ApplicationCommandOptionType.String,
+            required: true,
+          },
+        ],
+      },
+      {
+        name: "history",
+        description: "Show recent run history for a cron job",
+        type: ApplicationCommandOptionType.Subcommand,
+        options: [
+          {
+            name: "id",
+            description: "Job ID",
+            type: ApplicationCommandOptionType.String,
+            required: true,
+          },
+          {
+            name: "limit",
+            description: "Number of entries to show (default 10)",
+            type: ApplicationCommandOptionType.Integer,
+            required: false,
+          },
+        ],
+      },
+    ],
+  },
 ];
 
 // ---------------------------------------------------------------------------
@@ -187,6 +326,9 @@ export async function handleInteraction(interaction: Interaction): Promise<void>
         break;
       case "skills":
         await handleSkills(interaction);
+        break;
+      case "cron":
+        await handleCron(interaction);
         break;
       case "restart":
         await interaction.reply({ content: "Restarting...", ephemeral: true });
@@ -319,6 +461,13 @@ async function handleHelp(
           "`/skills add-github <url>` — Install skill from GitHub",
           "`/skills add-file <file>` — Install skill from upload",
           "`/skills remove <name>` — Remove a skill",
+          "`/cron list` — List cron jobs",
+          "`/cron show <id>` — Show job details",
+          "`/cron add` — Create a new cron job",
+          "`/cron remove <id>` — Delete a cron job",
+          "`/cron enable/disable <id>` — Toggle a job",
+          "`/cron run <id>` — Force-run a job now",
+          "`/cron history <id>` — View run history",
           "`/restart` — Restart the bot process",
         ].join("\n"),
       },
@@ -613,6 +762,388 @@ async function handleSkills(
         ephemeral: true,
       });
   }
+}
+
+// ---------------------------------------------------------------------------
+// /cron
+// ---------------------------------------------------------------------------
+
+function formatSchedule(schedule: CronSchedule): string {
+  switch (schedule.type) {
+    case "at":
+      return `Once at <t:${Math.floor(schedule.timestamp / 1000)}:F>`;
+    case "every": {
+      const ms = schedule.intervalMs;
+      if (ms < 60_000) return `Every ${Math.round(ms / 1000)}s`;
+      if (ms < 3_600_000) return `Every ${Math.round(ms / 60_000)}m`;
+      if (ms < 86_400_000) return `Every ${Math.round(ms / 3_600_000)}h`;
+      return `Every ${Math.round(ms / 86_400_000)}d`;
+    }
+    case "cron":
+      return `\`${schedule.expression}\`${schedule.tz ? ` (${schedule.tz})` : ""}`;
+    default:
+      return "Unknown";
+  }
+}
+
+function formatPayload(payload: CronPayload): string {
+  if (payload.kind === "systemEvent") {
+    return `System event: ${payload.text}`;
+  }
+  if (payload.kind === "agentTurn") {
+    const msg = payload.message.length > 100
+      ? payload.message.slice(0, 100) + "…"
+      : payload.message;
+    return `Agent turn: ${msg}`;
+  }
+  return "Unknown";
+}
+
+/**
+ * Parse a schedule string from the user into a CronSchedule.
+ * Accepts:
+ *   - "every 30m", "every 2h", "every 1d", "every 90s"
+ *   - standard cron expressions like "0 9 * * *"
+ */
+function parseScheduleInput(input: string, tz?: string): CronSchedule {
+  const everyMatch = input.match(/^every\s+(\d+)\s*(s|sec|second|seconds|m|min|minute|minutes|h|hr|hour|hours|d|day|days)$/i);
+  if (everyMatch) {
+    const value = parseInt(everyMatch[1], 10);
+    const unit = everyMatch[2].toLowerCase();
+    let ms: number;
+    if (unit.startsWith("s")) ms = value * 1000;
+    else if (unit.startsWith("m")) ms = value * 60_000;
+    else if (unit.startsWith("h")) ms = value * 3_600_000;
+    else ms = value * 86_400_000;
+    return { type: "every", intervalMs: ms };
+  }
+
+  // Otherwise treat as cron expression
+  return { type: "cron", expression: input.trim(), tz };
+}
+
+async function handleCron(
+  interaction: import("discord.js").ChatInputCommandInteraction,
+): Promise<void> {
+  if (!cronService) {
+    await interaction.reply({
+      content: "Cron service is not available.",
+      ephemeral: true,
+    });
+    return;
+  }
+
+  const subcommand = interaction.options.getSubcommand();
+
+  switch (subcommand) {
+    // -----------------------------------------------------------------------
+    // /cron list
+    // -----------------------------------------------------------------------
+    case "list": {
+      const jobs = cronService.list();
+
+      if (jobs.length === 0) {
+        await interaction.reply({
+          content: "No cron jobs configured.",
+          ephemeral: true,
+        });
+        return;
+      }
+
+      const lines = jobs.map((job) => {
+        const status = job.enabled ? "🟢" : "🔴";
+        const schedule = formatSchedule(job.schedule);
+        const nextRun = job.state.nextRunAtMs
+          ? `<t:${Math.floor(job.state.nextRunAtMs / 1000)}:R>`
+          : "—";
+        return `${status} **${job.name}** (\`${job.id}\`)\n  Schedule: ${schedule} · Next: ${nextRun}`;
+      });
+
+      const embed = new EmbedBuilder()
+        .setTitle("⏰ Cron Jobs")
+        .setDescription(lines.join("\n\n"))
+        .setFooter({ text: `${jobs.length} job(s)` })
+        .setColor(0x5865f2);
+
+      await interaction.reply({ embeds: [embed], ephemeral: true });
+      break;
+    }
+
+    // -----------------------------------------------------------------------
+    // /cron show <id>
+    // -----------------------------------------------------------------------
+    case "show": {
+      const id = interaction.options.getString("id", true);
+      const job = cronService.get(id);
+
+      if (!job) {
+        await interaction.reply({
+          content: `Job \`${id}\` not found.`,
+          ephemeral: true,
+        });
+        return;
+      }
+
+      const embed = buildJobDetailEmbed(job);
+      await interaction.reply({ embeds: [embed], ephemeral: true });
+      break;
+    }
+
+    // -----------------------------------------------------------------------
+    // /cron add
+    // -----------------------------------------------------------------------
+    case "add": {
+      const name = interaction.options.getString("name", true);
+      const scheduleInput = interaction.options.getString("schedule", true);
+      const message = interaction.options.getString("message", true);
+      const channel = interaction.options.getChannel("channel");
+      const timezone = interaction.options.getString("timezone") ?? undefined;
+
+      const deliveryChannelId = channel?.id ?? interaction.channelId;
+
+      let schedule: CronSchedule;
+      try {
+        schedule = parseScheduleInput(scheduleInput, timezone);
+      } catch {
+        await interaction.reply({
+          content: `Invalid schedule: \`${scheduleInput}\`. Use a cron expression or \`every <N>m/h/d\`.`,
+          ephemeral: true,
+        });
+        return;
+      }
+
+      const payload: CronPayload = { kind: "agentTurn", message };
+      const delivery: CronDelivery = {
+        channelId: deliveryChannelId,
+        mentionUser: interaction.user.id,
+      };
+
+      const job = cronService.add({
+        name,
+        enabled: true,
+        schedule,
+        payload,
+        delivery,
+      });
+
+      const nextRun = job.state.nextRunAtMs
+        ? `<t:${Math.floor(job.state.nextRunAtMs / 1000)}:R>`
+        : "not scheduled";
+
+      await interaction.reply({
+        content: `✅ Cron job **${name}** created (\`${job.id}\`). Next run: ${nextRun}`,
+        ephemeral: true,
+      });
+      console.log(`[bot] Cron job created via /cron add: "${name}" (${job.id})`);
+      break;
+    }
+
+    // -----------------------------------------------------------------------
+    // /cron remove <id>
+    // -----------------------------------------------------------------------
+    case "remove": {
+      const id = interaction.options.getString("id", true);
+      const job = cronService.get(id);
+
+      if (!job) {
+        await interaction.reply({
+          content: `Job \`${id}\` not found.`,
+          ephemeral: true,
+        });
+        return;
+      }
+
+      const removed = cronService.remove(id);
+      await interaction.reply({
+        content: removed
+          ? `🗑️ Job **${job.name}** (\`${id}\`) removed.`
+          : `Failed to remove job \`${id}\`.`,
+        ephemeral: true,
+      });
+      if (removed) {
+        console.log(`[bot] Cron job removed via /cron remove: "${job.name}" (${id})`);
+      }
+      break;
+    }
+
+    // -----------------------------------------------------------------------
+    // /cron enable <id>
+    // -----------------------------------------------------------------------
+    case "enable": {
+      const id = interaction.options.getString("id", true);
+      const job = cronService.update(id, { enabled: true });
+
+      if (!job) {
+        await interaction.reply({
+          content: `Job \`${id}\` not found.`,
+          ephemeral: true,
+        });
+        return;
+      }
+
+      const nextRun = job.state.nextRunAtMs
+        ? `<t:${Math.floor(job.state.nextRunAtMs / 1000)}:R>`
+        : "not scheduled";
+
+      await interaction.reply({
+        content: `🟢 Job **${job.name}** enabled. Next run: ${nextRun}`,
+        ephemeral: true,
+      });
+      console.log(`[bot] Cron job enabled via /cron enable: "${job.name}" (${id})`);
+      break;
+    }
+
+    // -----------------------------------------------------------------------
+    // /cron disable <id>
+    // -----------------------------------------------------------------------
+    case "disable": {
+      const id = interaction.options.getString("id", true);
+      const job = cronService.update(id, { enabled: false });
+
+      if (!job) {
+        await interaction.reply({
+          content: `Job \`${id}\` not found.`,
+          ephemeral: true,
+        });
+        return;
+      }
+
+      await interaction.reply({
+        content: `🔴 Job **${job.name}** disabled.`,
+        ephemeral: true,
+      });
+      console.log(`[bot] Cron job disabled via /cron disable: "${job.name}" (${id})`);
+      break;
+    }
+
+    // -----------------------------------------------------------------------
+    // /cron run <id>
+    // -----------------------------------------------------------------------
+    case "run": {
+      const id = interaction.options.getString("id", true);
+      const job = cronService.get(id);
+
+      if (!job) {
+        await interaction.reply({
+          content: `Job \`${id}\` not found.`,
+          ephemeral: true,
+        });
+        return;
+      }
+
+      await interaction.deferReply({ ephemeral: true });
+
+      try {
+        await cronService.forceRun(id);
+        await interaction.editReply({
+          content: `▶️ Job **${job.name}** executed successfully.`,
+        });
+      } catch (err) {
+        await interaction.editReply({
+          content: `❌ Job **${job.name}** failed: ${err instanceof Error ? err.message : String(err)}`,
+        });
+      }
+      console.log(`[bot] Cron job force-run via /cron run: "${job.name}" (${id})`);
+      break;
+    }
+
+    // -----------------------------------------------------------------------
+    // /cron history <id>
+    // -----------------------------------------------------------------------
+    case "history": {
+      const id = interaction.options.getString("id", true);
+      const limit = interaction.options.getInteger("limit") ?? 10;
+      const job = cronService.get(id);
+
+      if (!job) {
+        await interaction.reply({
+          content: `Job \`${id}\` not found.`,
+          ephemeral: true,
+        });
+        return;
+      }
+
+      const runs = cronService.getRunHistory(id, limit);
+
+      if (runs.length === 0) {
+        await interaction.reply({
+          content: `No run history for job **${job.name}**.`,
+          ephemeral: true,
+        });
+        return;
+      }
+
+      const lines = runs.map((run) => {
+        const status = run.status === "ok" ? "✅" : run.status === "error" ? "❌" : "⏭️";
+        const time = `<t:${Math.floor(run.startedAt / 1000)}:R>`;
+        const duration = `${Math.round((run.completedAt - run.startedAt) / 1000)}s`;
+        const detail = run.error ? ` — \`${run.error.slice(0, 80)}\`` : "";
+        return `${status} ${time} (${duration})${detail}`;
+      });
+
+      const embed = new EmbedBuilder()
+        .setTitle(`📜 Run History — ${job.name}`)
+        .setDescription(lines.join("\n"))
+        .setFooter({ text: `Showing ${runs.length} most recent run(s)` })
+        .setColor(0x5865f2);
+
+      await interaction.reply({ embeds: [embed], ephemeral: true });
+      break;
+    }
+
+    default:
+      await interaction.reply({
+        content: "Unknown cron subcommand.",
+        ephemeral: true,
+      });
+  }
+}
+
+function buildJobDetailEmbed(job: CronJob): EmbedBuilder {
+  const status = job.enabled ? "🟢 Enabled" : "🔴 Disabled";
+  const schedule = formatSchedule(job.schedule);
+  const payload = formatPayload(job.payload);
+  const nextRun = job.state.nextRunAtMs
+    ? `<t:${Math.floor(job.state.nextRunAtMs / 1000)}:F> (<t:${Math.floor(job.state.nextRunAtMs / 1000)}:R>)`
+    : "—";
+  const lastRun = job.state.lastRunAtMs
+    ? `<t:${Math.floor(job.state.lastRunAtMs / 1000)}:R> — ${job.state.lastRunStatus ?? "unknown"}`
+    : "Never";
+  const delivery = job.delivery
+    ? `<#${job.delivery.channelId}>${job.delivery.mentionUser ? ` (mention <@${job.delivery.mentionUser}>)` : ""}`
+    : "None";
+
+  const fields = [
+    { name: "Status", value: status, inline: true },
+    { name: "Schedule", value: schedule, inline: true },
+    { name: "Next Run", value: nextRun, inline: false },
+    { name: "Last Run", value: lastRun, inline: false },
+    { name: "Payload", value: payload, inline: false },
+    { name: "Delivery", value: delivery, inline: false },
+  ];
+
+  if (job.state.lastError) {
+    fields.push({
+      name: "Last Error",
+      value: `\`\`\`${job.state.lastError.slice(0, 200)}\`\`\``,
+      inline: false,
+    });
+  }
+
+  if (job.state.consecutiveErrors && job.state.consecutiveErrors > 0) {
+    fields.push({
+      name: "Consecutive Errors",
+      value: `${job.state.consecutiveErrors}`,
+      inline: true,
+    });
+  }
+
+  return new EmbedBuilder()
+    .setTitle(`⏰ ${job.name}`)
+    .setDescription(`ID: \`${job.id}\`${job.description ? `\n${job.description}` : ""}`)
+    .addFields(fields)
+    .setColor(job.enabled ? 0x57f287 : 0xed4245)
+    .setFooter({ text: `Created ${new Date(job.createdAt).toISOString()}` });
 }
 
 // ---------------------------------------------------------------------------

@@ -9,7 +9,7 @@ import { CronService } from "./cron/service.js";
 import { SkillService } from "./skills/service.js";
 import { processAgentTurn } from "./agent/agent.js";
 import { createClient, startBot, stopBot } from "./bot/client.js";
-import { setCommandsSkillService } from "./bot/commands.js";
+import { setCommandsSkillService, setCommandsCronService } from "./bot/commands.js";
 import { startGateway } from "./gateway/server.js";
 import { cleanExpiredSessions } from "./agent/sessions.js";
 import { setRestartHandler } from "./restart.js";
@@ -60,6 +60,7 @@ async function main(): Promise<void> {
     (message, model) => processAgentTurn({ message, model }),
   );
   cronService.start();
+  setCommandsCronService(cronService);
 
   // 5. Start Discord bot
   console.log("[discordclaw] Connecting to Discord...");
