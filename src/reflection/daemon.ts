@@ -42,6 +42,12 @@ const MIN_SIGNALS_FOR_REFLECTION = parseInt(
 /** Prune signals older than this (default: 7 days) */
 const SIGNAL_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 
+/** Max characters of conversation history to include in the reflection prompt */
+const MAX_CONVERSATION_CHARS = parseInt(
+  process.env.REFLECTION_MAX_CONVERSATION_CHARS || "50000",
+  10,
+);
+
 const REFLECTION_MODEL = process.env.REFLECTION_MODEL || process.env.ANTHROPIC_MODEL || "bedrock-claude-opus-4-6-1m";
 
 function log(...args: unknown[]): void {
@@ -75,6 +81,19 @@ export function setReflectionChannelId(channelId: string): void {
 }
 
 // ---------------------------------------------------------------------------
+// Conversation history types
+// ---------------------------------------------------------------------------
+
+interface ConversationThread {
+  sessionId: string;
+  channelId: string | null;
+  userId: string | null;
+  startedAt: number;
+  lastActiveAt: number;
+  messages: { role: string; content: string; createdAt: number }[];
+}
+
+// ---------------------------------------------------------------------------
 // Gather context for reflection
 // ---------------------------------------------------------------------------
 
@@ -87,6 +106,7 @@ interface ReflectionContext {
   recentIdeas: Evolution[];
   recentDeployed: Evolution[];
   conversationStats: { totalSessions: number; totalMessages: number };
+  conversationHistory: ConversationThread[];
   totalSignals: number;
 }
 
@@ -111,6 +131,9 @@ function gatherContext(): ReflectionContext {
     .prepare("SELECT COUNT(*) as count FROM messages WHERE created_at > ?")
     .get(since) as { count: number };
 
+  // Full conversation history from the lookback window
+  const conversationHistory = gatherConversationHistory(since);
+
   const allSignals = getSignalsSince(since);
 
   return {
@@ -125,8 +148,112 @@ function gatherContext(): ReflectionContext {
       totalSessions: sessionRow.count,
       totalMessages: messageRow.count,
     },
+    conversationHistory,
     totalSignals: allSignals.length,
   };
+}
+
+// ---------------------------------------------------------------------------
+// Gather full conversation history grouped by session
+// ---------------------------------------------------------------------------
+
+function gatherConversationHistory(since: number): ConversationThread[] {
+  const db = getDb();
+
+  // Get all sessions active in the lookback window
+  const sessions = db
+    .prepare(
+      `SELECT id, channel_id, user_id, created_at, last_active
+       FROM sessions
+       WHERE last_active > ?
+       ORDER BY last_active DESC`,
+    )
+    .all(since) as {
+      id: string;
+      channel_id: string | null;
+      user_id: string | null;
+      created_at: number;
+      last_active: number;
+    }[];
+
+  const threads: ConversationThread[] = [];
+
+  for (const session of sessions) {
+    // Get all messages for this session in the lookback window
+    const messages = db
+      .prepare(
+        `SELECT role, content, created_at
+         FROM messages
+         WHERE session_id = ? AND created_at > ?
+         ORDER BY created_at ASC`,
+      )
+      .all(session.id, since) as {
+        role: string;
+        content: string;
+        created_at: number;
+      }[];
+
+    if (messages.length === 0) continue;
+
+    threads.push({
+      sessionId: session.id,
+      channelId: session.channel_id,
+      userId: session.user_id,
+      startedAt: session.created_at,
+      lastActiveAt: session.last_active,
+      messages: messages.map((m) => ({
+        role: m.role,
+        content: m.content,
+        createdAt: m.created_at,
+      })),
+    });
+  }
+
+  return threads;
+}
+
+// ---------------------------------------------------------------------------
+// Format conversation history for the prompt with smart truncation
+// ---------------------------------------------------------------------------
+
+function formatConversationHistory(threads: ConversationThread[]): string {
+  if (threads.length === 0) return "";
+
+  const parts: string[] = [];
+  let totalChars = 0;
+
+  for (const thread of threads) {
+    const threadHeader = `### Conversation (session: ${thread.sessionId.slice(0, 8)}..., channel: ${thread.channelId || "DM"}, user: ${thread.userId || "unknown"})`;
+    const threadMessages: string[] = [];
+
+    for (const msg of thread.messages) {
+      const timestamp = new Date(msg.createdAt).toISOString();
+      // Truncate very long individual messages (e.g., tool results with huge output)
+      const content = msg.content.length > 2000
+        ? msg.content.slice(0, 2000) + "... [truncated]"
+        : msg.content;
+      const formatted = `[${timestamp}] **${msg.role}**: ${content}`;
+
+      // Check if adding this message would exceed our budget
+      if (totalChars + formatted.length > MAX_CONVERSATION_CHARS) {
+        threadMessages.push(`... [${thread.messages.length - threadMessages.length} more messages truncated]`);
+        break;
+      }
+
+      threadMessages.push(formatted);
+      totalChars += formatted.length;
+    }
+
+    parts.push(threadHeader + "\n" + threadMessages.join("\n"));
+
+    // If we've hit the budget, stop adding threads
+    if (totalChars >= MAX_CONVERSATION_CHARS) {
+      parts.push(`\n... [${threads.length - parts.length} more conversations truncated]`);
+      break;
+    }
+  }
+
+  return parts.join("\n\n");
 }
 
 // ---------------------------------------------------------------------------
@@ -138,14 +265,15 @@ function buildReflectionPrompt(ctx: ReflectionContext): string {
 
   parts.push(`You are a self-improving AI assistant analyzing your own performance over the last ${Math.round(SIGNAL_LOOKBACK_MS / 3600000)} hours.
 
-Your job is to identify the SINGLE most impactful improvement you could make to yourself. You have access to signals collected from your recent operation.
+Your job is to identify the SINGLE most impactful improvement you could make to yourself. You have access to signals collected from your recent operation, as well as the FULL conversation history from this period.
 
 ## Rules
 - Be specific and actionable. "Improve error handling" is too vague. "Add retry logic for Discord API timeouts in send_message tool" is good.
 - Consider whether the improvement should be a CODE change (new runtime capability) or a SKILL (procedural knowledge using existing tools).
 - If you don't see any meaningful improvement opportunity, say so. Don't force it.
 - Prioritize: errors/failures > unhandled user requests > efficiency > nice-to-haves.
-- Don't suggest things that have already been deployed or are in the ideas backlog (listed below).`);
+- Don't suggest things that have already been deployed or are in the ideas backlog (listed below).
+- Pay close attention to the conversation history — look for patterns where users struggled, where you gave suboptimal answers, where you took too many steps to accomplish something, or where users asked for things you couldn't do.`);
 
   parts.push(`## Activity Summary
 - Active sessions: ${ctx.conversationStats.totalSessions}
@@ -153,11 +281,11 @@ Your job is to identify the SINGLE most impactful improvement you could make to 
 - Total signals collected: ${ctx.totalSignals}`);
 
   parts.push(`## Signal Summary
-- Errors: ${ctx.signalSummary.error}
-- Tool failures: ${ctx.signalSummary.tool_failure}
-- Unknown requests: ${ctx.signalSummary.unknown_request}
-- User sentiment signals: ${ctx.signalSummary.user_sentiment}
-- Patterns: ${ctx.signalSummary.pattern}`);
+- Errors: ${ctx.signalSummary.error || 0}
+- Tool failures: ${ctx.signalSummary.tool_failure || 0}
+- Unknown requests: ${ctx.signalSummary.unknown_request || 0}
+- User sentiment signals: ${ctx.signalSummary.user_sentiment || 0}
+- Patterns: ${ctx.signalSummary.pattern || 0}`);
 
   if (ctx.topErrors.length > 0) {
     parts.push(`## Top Errors\n${ctx.topErrors.map((e) => `- [${e.count}x] ${e.detail}`).join("\n")}`);
@@ -173,6 +301,12 @@ Your job is to identify the SINGLE most impactful improvement you could make to 
 
   if (ctx.recentPositive.length > 0) {
     parts.push(`## Positive Signals\n${ctx.recentPositive.map((e) => `- [${e.count}x] ${e.detail}`).join("\n")}`);
+  }
+
+  // Full conversation history
+  const conversationText = formatConversationHistory(ctx.conversationHistory);
+  if (conversationText) {
+    parts.push(`## Full Conversation History\n\nBelow are all conversations from the lookback period. Analyze these for patterns, pain points, and improvement opportunities.\n\n${conversationText}`);
   }
 
   if (ctx.recentIdeas.length > 0) {
@@ -192,7 +326,8 @@ Respond in EXACTLY this JSON format:
   "description": "Detailed description of what to change and why",
   "type": "code" | "skill" | "soul",
   "priority": "high" | "medium" | "low",
-  "reasoning": "Why this is the most impactful thing to work on"
+  "reasoning": "Why this is the most impactful thing to work on",
+  "evidence": "Specific quotes or patterns from conversations that support this proposal"
 }
 
 If nothing warrants action, set has_proposal to false and explain why in reasoning.`);
@@ -218,14 +353,15 @@ async function runReflection(): Promise<ReflectionResult> {
     // 1. Gather context
     const ctx = gatherContext();
 
-    // Skip if not enough signals
-    if (ctx.totalSignals < MIN_SIGNALS_FOR_REFLECTION) {
-      log(`Skipping reflection — only ${ctx.totalSignals} signals (need ${MIN_SIGNALS_FOR_REFLECTION})`);
+    // Skip if not enough signals AND no conversations to analyze
+    if (ctx.totalSignals < MIN_SIGNALS_FOR_REFLECTION && ctx.conversationHistory.length === 0) {
+      log(`Skipping reflection — only ${ctx.totalSignals} signals (need ${MIN_SIGNALS_FOR_REFLECTION}) and no conversations`);
       recordReflectionRun(runStarted, "skipped", 0, null, null, null);
       return { outcome: "skipped" };
     }
 
-    log(`Running reflection with ${ctx.totalSignals} signals...`);
+    const totalMessages = ctx.conversationHistory.reduce((sum, t) => sum + t.messages.length, 0);
+    log(`Running reflection with ${ctx.totalSignals} signals, ${ctx.conversationHistory.length} conversations (${totalMessages} messages)...`);
 
     // 2. Build prompt and call Claude
     const prompt = buildReflectionPrompt(ctx);
@@ -249,6 +385,7 @@ async function runReflection(): Promise<ReflectionResult> {
       type?: string;
       priority?: string;
       reasoning?: string;
+      evidence?: string;
     };
 
     try {
@@ -272,12 +409,12 @@ async function runReflection(): Promise<ReflectionResult> {
       return { outcome: "no_action" };
     }
 
-    const proposalText = `**${proposal.title}**\n\n${proposal.description}\n\n**Type:** ${proposal.type} | **Priority:** ${proposal.priority}\n**Reasoning:** ${proposal.reasoning}`;
+    const proposalText = `**${proposal.title}**\n\n${proposal.description}\n\n**Type:** ${proposal.type} | **Priority:** ${proposal.priority}\n**Reasoning:** ${proposal.reasoning}${proposal.evidence ? `\n**Evidence:** ${proposal.evidence}` : ""}`;
 
     // Record as an evolution idea
     const evolution = recordSuggestion({
       what: proposal.title || "Untitled improvement",
-      why: `${proposal.description}\n\n[Auto-discovered by reflection daemon]\nType: ${proposal.type}\nPriority: ${proposal.priority}\nReasoning: ${proposal.reasoning}`,
+      why: `${proposal.description}\n\n[Auto-discovered by reflection daemon]\nType: ${proposal.type}\nPriority: ${proposal.priority}\nReasoning: ${proposal.reasoning}${proposal.evidence ? `\nEvidence: ${proposal.evidence}` : ""}`,
       triggeredBy: "reflection-daemon",
     });
 
@@ -289,7 +426,7 @@ async function runReflection(): Promise<ReflectionResult> {
         const discordMessage = [
           `🔮 **Self-Reflection Report**`,
           ``,
-          `I analyzed ${ctx.totalSignals} signals from the last ${Math.round(SIGNAL_LOOKBACK_MS / 3600000)} hours and found a potential improvement:`,
+          `I analyzed ${ctx.totalSignals} signals and ${totalMessages} messages across ${ctx.conversationHistory.length} conversations from the last ${Math.round(SIGNAL_LOOKBACK_MS / 3600000)} hours and found a potential improvement:`,
           ``,
           proposalText,
           ``,
