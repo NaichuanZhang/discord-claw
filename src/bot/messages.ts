@@ -130,8 +130,17 @@ function fmtTokens(n: number): string {
   return String(n);
 }
 
+/** Format duration in seconds: 45200 → "45.2s", 125000 → "2m 5s" */
+function fmtDuration(ms: number): string {
+  const secs = ms / 1000;
+  if (secs < 60) return `${secs.toFixed(1)}s`;
+  const mins = Math.floor(secs / 60);
+  const remainSecs = Math.round(secs % 60);
+  return `${mins}m ${remainSecs}s`;
+}
+
 /** Build a single-line usage string for appending to the message */
-function formatUsageLine(usage: TokenUsage): string {
+function formatUsageLine(usage: TokenUsage, durationMs?: number): string {
   const pricing = getModelPricing(usage.model);
   const cost =
     (usage.inputTokens * pricing.input +
@@ -141,7 +150,8 @@ function formatUsageLine(usage: TokenUsage): string {
     1e6;
 
   const model = shortModelName(usage.model);
-  return `-# 📊 ${model} · ${fmtTokens(usage.inputTokens)} in / ${fmtTokens(usage.outputTokens)} out · $${cost.toFixed(4)}`;
+  const durationPart = durationMs != null ? ` · ${fmtDuration(durationMs)}` : "";
+  return `-# 📊 ${model} · ${fmtTokens(usage.inputTokens)} in / ${fmtTokens(usage.outputTokens)} out · $${cost.toFixed(4)}${durationPart}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -329,7 +339,8 @@ export async function handleMessage(message: DiscordMessage): Promise<void> {
   startTyping();
 
   try {
-    // 7. Agent dispatch — now returns AgentResponse with text + images + usage
+    // 7. Agent dispatch — track latency
+    const startTime = Date.now();
     const response: AgentResponse = await processMessage({
       message: cleanContent,
       sessionId: session.id,
@@ -342,6 +353,7 @@ export async function handleMessage(message: DiscordMessage): Promise<void> {
       history,
       channelConfig,
     });
+    const durationMs = Date.now() - startTime;
 
     stopTyping();
 
@@ -393,10 +405,10 @@ export async function handleMessage(message: DiscordMessage): Promise<void> {
     const files = buildImageAttachments(response.images);
     const hasMedia = embeds.length > 0 || files.length > 0;
 
-    // 9b. Append usage line to the display text
+    // 9b. Append usage line to the display text (with latency)
     let displayText = response.text;
     if (response.usage) {
-      const usageLine = formatUsageLine(response.usage);
+      const usageLine = formatUsageLine(response.usage, durationMs);
       displayText = displayText ? `${displayText}\n${usageLine}` : usageLine;
     }
 
@@ -437,11 +449,11 @@ export async function handleMessage(message: DiscordMessage): Promise<void> {
     }
 
     const imageCount = response.images.length;
-    // Log usage info
+    // Log usage info (with latency)
     if (response.usage) {
       const u = response.usage;
       console.log(
-        `[bot] Usage: model=${u.model} in=${u.inputTokens} out=${u.outputTokens} cache_create=${u.cacheCreationTokens} cache_read=${u.cacheReadTokens}`,
+        `[bot] Usage: model=${u.model} in=${u.inputTokens} out=${u.outputTokens} cache_create=${u.cacheCreationTokens} cache_read=${u.cacheReadTokens} latency=${fmtDuration(durationMs)}`,
       );
     }
     console.log(
