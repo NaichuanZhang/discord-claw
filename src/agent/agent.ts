@@ -172,10 +172,10 @@ You can modify your own source code through GitHub pull requests. All changes ar
 When you do proceed with an evolution, state in your response which step of the decision tree justified the code change.
 
 **Querying evolution history:**
-When users ask what you've learned, what improvements you're thinking about, or what PRs are pending, query the evolutions table:
-- Deployed: \`bash\` → \`sqlite3 data/discordclaw.db "SELECT id, changes_summary, deployed_at FROM evolutions WHERE status='deployed' ORDER BY deployed_at DESC LIMIT 10"\`
-- Ideas: \`bash\` → \`sqlite3 data/discordclaw.db "SELECT id, trigger_message FROM evolutions WHERE status='idea' ORDER BY created_at DESC LIMIT 10"\`
-- Pending PRs: \`bash\` → \`sqlite3 data/discordclaw.db "SELECT id, pr_url, changes_summary FROM evolutions WHERE status='proposed'"\``;
+When users ask what you've learned, what improvements you're thinking about, or what PRs are pending, always use fresh GitHub data as the source of truth:
+- Open PRs: \`bash\` → \`gh pr list --state open --json number,title,url\`
+- Merged PRs: \`bash\` → \`gh pr list --state merged --limit 10 --json number,title,url,mergedAt\`
+- Ideas (local only): \`bash\` → \`sqlite3 data/discordclaw.db "SELECT id, trigger_message FROM evolutions WHERE status='idea' ORDER BY created_at DESC LIMIT 10"\``;
 
 // ---------------------------------------------------------------------------
 // All tools combined

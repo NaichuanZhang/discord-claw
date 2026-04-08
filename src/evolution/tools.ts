@@ -197,6 +197,53 @@ export function setEvolutionContext(channelId?: string, userId?: string): void {
 }
 
 // ---------------------------------------------------------------------------
+// GitHub PR query helpers (live data, no DB)
+// ---------------------------------------------------------------------------
+
+interface GitHubPR {
+  number: number;
+  title: string;
+  state: string;
+  url: string;
+  headRefName: string;
+  changedFiles: number;
+  additions: number;
+  deletions: number;
+  files?: { path: string }[];
+}
+
+/**
+ * List open PRs from GitHub. Always fresh data.
+ */
+async function listOpenPRs(): Promise<GitHubPR[]> {
+  try {
+    const { stdout } = await gh([
+      "pr", "list",
+      "--state", "open",
+      "--json", "number,title,state,url,headRefName,changedFiles,additions,deletions",
+    ]);
+    return JSON.parse(stdout) as GitHubPR[];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Get a single PR by number from GitHub.
+ */
+async function getPRByNumber(prNumber: number): Promise<GitHubPR | null> {
+  try {
+    const { stdout } = await gh([
+      "pr", "view", String(prNumber),
+      "--json", "number,title,state,url,headRefName,changedFiles,additions,deletions,files",
+    ]);
+    return JSON.parse(stdout) as GitHubPR;
+  } catch {
+    return null;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Tool handler
 // ---------------------------------------------------------------------------
 
@@ -358,27 +405,60 @@ export async function handleEvolutionTool(
 
       case "evolve_review": {
         const id = input.id as string | undefined;
-        let evolution;
+
+        // If an evolution id is provided, look it up in DB to get PR number
         if (id) {
-          evolution = getEvolution(id);
+          const evolution = getEvolution(id);
           if (!evolution) {
             return JSON.stringify({ error: `Evolution not found: ${id}` });
           }
-        } else {
-          const proposed = listEvolutions({ status: "proposed" });
-          if (proposed.length === 0) {
-            return JSON.stringify({ error: "No proposed evolutions to review." });
+          if (!evolution.prNumber) {
+            return JSON.stringify({ error: `Evolution ${id} has no PR number.` });
           }
-          evolution = proposed[proposed.length - 1];
+
+          // Fetch live PR data from GitHub
+          const pr = await getPRByNumber(evolution.prNumber);
+          if (!pr) {
+            return JSON.stringify({ error: `PR #${evolution.prNumber} not found on GitHub. It may have been closed or merged.` });
+          }
+
+          let diff = "";
+          try {
+            const { stdout } = await gh(["pr", "diff", String(pr.number)]);
+            diff = stdout.length > MAX_OUTPUT
+              ? stdout.slice(0, MAX_OUTPUT) + "\n... (truncated)"
+              : stdout;
+          } catch (err: any) {
+            diff = `(Failed to fetch diff: ${err.message})`;
+          }
+
+          return JSON.stringify({
+            id: evolution.id,
+            pr_number: pr.number,
+            pr_url: pr.url,
+            title: pr.title,
+            state: pr.state,
+            branch: pr.headRefName,
+            summary: evolution.changesSummary,
+            files_changed: pr.files?.map((f) => f.path) ?? evolution.filesChanged,
+            additions: pr.additions,
+            deletions: pr.deletions,
+            diff,
+          });
         }
 
-        if (evolution.status !== "proposed" || !evolution.prNumber) {
-          return JSON.stringify({ error: `Evolution ${evolution.id} is not a proposed PR.` });
+        // No id provided — find most recent open PR from GitHub
+        const openPRs = await listOpenPRs();
+        if (openPRs.length === 0) {
+          return JSON.stringify({ error: "No open PRs found on GitHub." });
         }
+
+        // Pick the most recent (highest number)
+        const latestPR = openPRs.reduce((a, b) => a.number > b.number ? a : b);
 
         let diff = "";
         try {
-          const { stdout } = await gh(["pr", "diff", String(evolution.prNumber)]);
+          const { stdout } = await gh(["pr", "diff", String(latestPR.number)]);
           diff = stdout.length > MAX_OUTPUT
             ? stdout.slice(0, MAX_OUTPUT) + "\n... (truncated)"
             : stdout;
@@ -386,13 +466,21 @@ export async function handleEvolutionTool(
           diff = `(Failed to fetch diff: ${err.message})`;
         }
 
+        // Try to find matching DB evolution for extra context
+        const proposed = listEvolutions({ status: "proposed" });
+        const matchingEvo = proposed.find((e) => e.prNumber === latestPR.number);
+
         return JSON.stringify({
-          id: evolution.id,
-          branch: evolution.branch,
-          summary: evolution.changesSummary,
-          pr_url: evolution.prUrl,
-          pr_number: evolution.prNumber,
-          files_changed: evolution.filesChanged,
+          id: matchingEvo?.id ?? null,
+          pr_number: latestPR.number,
+          pr_url: latestPR.url,
+          title: latestPR.title,
+          state: latestPR.state,
+          branch: latestPR.headRefName,
+          summary: matchingEvo?.changesSummary ?? latestPR.title,
+          changed_files: latestPR.changedFiles,
+          additions: latestPR.additions,
+          deletions: latestPR.deletions,
           diff,
         });
       }
