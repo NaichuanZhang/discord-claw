@@ -317,7 +317,7 @@ export class CronService {
         err instanceof Error ? err.message : String(err);
       log(`Error executing job "${job.name}" (${job.id}):`, error);
 
-      const consecutiveErrors = (job.state.consecutiveErrors ?? 0) + 1;
+      const consecutiveErrors = (job.state?.consecutiveErrors ?? 0) + 1;
 
       this.store.updateJobState(job.id, {
         lastRunAtMs: Date.now(),

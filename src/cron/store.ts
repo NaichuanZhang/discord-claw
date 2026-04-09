@@ -21,6 +21,17 @@ function log(...args: unknown[]): void {
   console.log("[cron-store]", ...args);
 }
 
+/** Ensure a loaded job has all required runtime fields. */
+function normalizeJob(raw: Partial<CronJob> & { id: string }): CronJob {
+  return {
+    ...raw,
+    enabled: raw.enabled ?? true,
+    state: raw.state ?? {},
+    createdAt: raw.createdAt ?? Date.now(),
+    updatedAt: raw.updatedAt ?? Date.now(),
+  } as CronJob;
+}
+
 export class CronStore {
   private jobs: CronJob[] = [];
 
@@ -29,7 +40,7 @@ export class CronStore {
     try {
       const raw = fs.readFileSync(JOBS_PATH, "utf-8");
       const data: CronStoreData = JSON.parse(raw);
-      this.jobs = data.jobs ?? [];
+      this.jobs = (data.jobs ?? []).map(normalizeJob);
       log(`Loaded ${this.jobs.length} job(s) from disk`);
     } catch (err: unknown) {
       if (isNodeError(err) && err.code === "ENOENT") {
@@ -95,6 +106,7 @@ export class CronStore {
     const job = this.jobs.find((j) => j.id === id);
     if (!job) return;
 
+    if (!job.state) job.state = {};
     Object.assign(job.state, state);
     this.save();
   }
