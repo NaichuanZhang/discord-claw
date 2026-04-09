@@ -1,9 +1,12 @@
 import {
   type Client,
   type Message as DiscordMessage,
+  type TextChannel,
+  type ThreadChannel,
   EmbedBuilder,
   AttachmentBuilder,
   MessageFlags,
+  ChannelType,
 } from "discord.js";
 import { existsSync } from "fs";
 import { basename } from "path";
@@ -29,6 +32,18 @@ let botClient: Client | null = null;
 export function setMessageClient(client: Client): void {
   botClient = client;
 }
+
+// ---------------------------------------------------------------------------
+// Track threads created by the bot so we can respond without mentions
+// ---------------------------------------------------------------------------
+
+/**
+ * Set of thread IDs that the bot created. Messages in these threads
+ * don't require an @mention — the bot responds to everything.
+ * Persisted in-memory; threads that get archived/deleted naturally
+ * expire from Discord's side.
+ */
+const botCreatedThreads = new Set<string>();
 
 // ---------------------------------------------------------------------------
 // Message splitting helper
@@ -217,6 +232,115 @@ async function transcribeVoiceMessage(
 }
 
 // ---------------------------------------------------------------------------
+// Thread creation helper
+// ---------------------------------------------------------------------------
+
+/** Maximum length for a Discord thread name */
+const MAX_THREAD_NAME_LENGTH = 100;
+
+/**
+ * Generate a short thread name from the user's message.
+ * Uses the first line/sentence, truncated to Discord's limit.
+ */
+function generateThreadName(userMessage: string, userName: string): string {
+  // Take first line or first 80 chars
+  let name = userMessage.split("\n")[0].trim();
+
+  // If the message is very short or empty after stripping, use a generic name
+  if (!name || name.length < 3) {
+    name = `Chat with ${userName}`;
+  }
+
+  // Truncate to Discord's limit (leave room for ellipsis)
+  if (name.length > MAX_THREAD_NAME_LENGTH - 1) {
+    name = name.slice(0, MAX_THREAD_NAME_LENGTH - 1) + "…";
+  }
+
+  return name;
+}
+
+/**
+ * Create a thread on the user's message and return it.
+ * Returns null if thread creation fails.
+ */
+async function createThreadForReply(
+  message: DiscordMessage,
+  cleanContent: string,
+): Promise<ThreadChannel | null> {
+  try {
+    const threadName = generateThreadName(
+      cleanContent,
+      message.author.displayName ?? message.author.username,
+    );
+
+    const thread = await message.startThread({
+      name: threadName,
+      autoArchiveDuration: 1440, // 24 hours
+    });
+
+    // Track this as a bot-created thread
+    botCreatedThreads.add(thread.id);
+
+    console.log(
+      `[bot] Created thread "${threadName}" (${thread.id}) for message ${message.id}`,
+    );
+
+    return thread;
+  } catch (err) {
+    console.error("[bot] Failed to create thread:", err);
+    return null;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Channel type helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Check if a message is in a guild text channel (not a thread, not a DM).
+ * These are the messages that should spawn a new thread.
+ */
+function isGuildTextChannel(message: DiscordMessage): boolean {
+  const channelType = message.channel.type;
+  return (
+    channelType === ChannelType.GuildText ||
+    channelType === ChannelType.GuildAnnouncement
+  );
+}
+
+/**
+ * Check if a message is inside a thread.
+ */
+function isThreadChannel(message: DiscordMessage): boolean {
+  const channelType = message.channel.type;
+  return (
+    channelType === ChannelType.PublicThread ||
+    channelType === ChannelType.PrivateThread ||
+    channelType === ChannelType.AnnouncementThread
+  );
+}
+
+/**
+ * Check if a thread was created by the bot (and thus doesn't need @mentions).
+ */
+function isBotCreatedThread(message: DiscordMessage): boolean {
+  if (!isThreadChannel(message)) return false;
+
+  // Check our in-memory set first
+  if (botCreatedThreads.has(message.channel.id)) return true;
+
+  // Fallback: check if the thread owner is the bot
+  const thread = message.channel as ThreadChannel;
+  if (thread.ownerId && botClient?.user?.id && thread.ownerId === botClient.user.id) {
+    // Cache it for future lookups
+    botCreatedThreads.add(thread.id);
+    return true;
+  }
+
+  return false;
+}
+
+// ---------------------------------------------------------------------------
 // Main message handler
 // ---------------------------------------------------------------------------
 
@@ -230,51 +354,56 @@ export async function handleMessage(message: DiscordMessage): Promise<void> {
   const isDM = message.channel.isDMBased();
   const isVoice = isVoiceMessage(message);
   const hasAudio = hasAudioAttachments(message);
+  const inBotThread = isBotCreatedThread(message);
 
   console.log(
-    `[bot] Message from ${message.author.tag} isDM=${isDM} isVoice=${isVoice} hasAudio=${hasAudio} content="${message.content.slice(0, 80)}"`,
+    `[bot] Message from ${message.author.tag} isDM=${isDM} isVoice=${isVoice} hasAudio=${hasAudio} inBotThread=${inBotThread} content="${message.content.slice(0, 80)}"`,
   );
 
-  // 2. Filter: in guild channels, only respond when mentioned
-  //    Exception: voice messages in DMs always get processed
+  // 2. Filter: in guild channels, respond when mentioned OR when in a bot-created thread
   if (!isDM) {
     const botUser = botClient?.user;
     if (!botUser) {
       console.log("[bot] Skipping — botClient.user is null");
       return;
     }
-    if (!message.mentions.has(botUser)) {
-      console.log("[bot] Skipping — bot not mentioned");
+    // In bot-created threads, respond to all messages (no mention needed)
+    // In other channels/threads, require a mention
+    if (!inBotThread && !message.mentions.has(botUser)) {
+      console.log("[bot] Skipping — bot not mentioned and not in bot thread");
       return;
     }
   }
 
   // 3. Filter: check channel config
-  const channelConfig = getChannelConfig(message.channelId);
+  // For threads, check the parent channel's config
+  const configChannelId = isThreadChannel(message)
+    ? (message.channel as ThreadChannel).parentId ?? message.channelId
+    : message.channelId;
+  const channelConfig = getChannelConfig(configChannelId);
   if (channelConfig?.enabled === false) return;
 
-  // 4. Session resolve
-  const isThread =
-    "isThread" in message.channel &&
-    typeof message.channel.isThread === "function"
-      ? message.channel.isThread()
-      : false;
+  // 4. Determine if we need to create a thread
+  // Create thread for guild text channel messages (not DMs, not already in threads)
+  const shouldCreateThread = !isDM && isGuildTextChannel(message);
 
-  const session = resolveSession({
-    threadId: isThread ? message.channel.id : undefined,
-    channelId: message.channelId,
-    userId: message.author.id,
-    guildId: message.guildId || undefined,
-    isDM,
-  });
+  // 5. Session resolve — use thread ID for isolation
+  const isThread = isThreadChannel(message);
 
-  // 5. Build context
-  const history = getSessionHistory(session.id);
+  // For new thread creation, we'll update the session after creating the thread
+  // For existing threads, use the thread ID
+  // For DMs, use existing behavior
+  let sessionThreadId: string | undefined;
+  if (isThread) {
+    sessionThreadId = message.channel.id;
+  }
+  // If shouldCreateThread, we'll set this after thread creation
 
+  // 6. Build context
   // Strip bot mention from content before sending to the agent
   let cleanContent = message.content.replace(/<@!?\d+>/g, "").trim();
 
-  // 5b. Handle voice messages — transcribe audio and use as message content
+  // 6b. Handle voice messages — transcribe audio and use as message content
   if (isVoice || hasAudio) {
     // Show typing while we transcribe
     if ("sendTyping" in message.channel) {
@@ -311,6 +440,29 @@ export async function handleMessage(message: DiscordMessage): Promise<void> {
 
   if (!cleanContent) return; // Nothing left after stripping mentions
 
+  // 7. Create thread if needed (before resolving session so session uses thread ID)
+  let replyTarget: DiscordMessage["channel"] | ThreadChannel = message.channel;
+
+  if (shouldCreateThread) {
+    const thread = await createThreadForReply(message, cleanContent);
+    if (thread) {
+      replyTarget = thread;
+      sessionThreadId = thread.id;
+    }
+    // If thread creation fails, fall back to replying in channel directly
+  }
+
+  // 8. Now resolve session with the correct thread ID
+  const session = resolveSession({
+    threadId: sessionThreadId,
+    channelId: message.channelId,
+    userId: message.author.id,
+    guildId: message.guildId || undefined,
+    isDM,
+  });
+
+  const history = getSessionHistory(session.id);
+
   // Resolve context details
   const guildName = message.guild?.name;
   const channelName =
@@ -318,15 +470,13 @@ export async function handleMessage(message: DiscordMessage): Promise<void> {
       ? message.channel.name
       : "DM";
 
-  // 6. Show typing indicator — refresh every 8s (Discord typing expires after ~10s)
+  // 9. Show typing indicator in the reply target — refresh every 8s
   let typingInterval: ReturnType<typeof setInterval> | null = null;
   const startTyping = () => {
-    if (!("sendTyping" in message.channel)) return;
-    message.channel.sendTyping().catch(() => {});
+    if (!("sendTyping" in replyTarget)) return;
+    (replyTarget as { sendTyping: () => Promise<void> }).sendTyping().catch(() => {});
     typingInterval = setInterval(() => {
-      (
-        message.channel as { sendTyping: () => Promise<void> }
-      ).sendTyping().catch(() => {});
+      (replyTarget as { sendTyping: () => Promise<void> }).sendTyping().catch(() => {});
     }, 8_000);
   };
   const stopTyping = () => {
@@ -339,7 +489,7 @@ export async function handleMessage(message: DiscordMessage): Promise<void> {
   startTyping();
 
   try {
-    // 7. Agent dispatch — track latency
+    // 10. Agent dispatch — track latency
     const startTime = Date.now();
     const response: AgentResponse = await processMessage({
       message: cleanContent,
@@ -357,7 +507,7 @@ export async function handleMessage(message: DiscordMessage): Promise<void> {
 
     stopTyping();
 
-    // 8. Log both messages to DB (store the full text with images for history)
+    // 11. Log both messages to DB (store the full text with images for history)
     const fullResponseText =
       response.text +
       (response.images.length > 0
@@ -381,7 +531,7 @@ export async function handleMessage(message: DiscordMessage): Promise<void> {
       usage: response.usage,
     });
 
-    // 8b. Broadcast to WebSocket log viewers
+    // 11b. Broadcast to WebSocket log viewers
     broadcastLog({
       type: "message",
       sessionId: session.id,
@@ -400,24 +550,24 @@ export async function handleMessage(message: DiscordMessage): Promise<void> {
       timestamp: Date.now(),
     });
 
-    // 9. Build image embeds and attachments
+    // 12. Build image embeds and attachments
     const embeds = buildImageEmbeds(response.images);
     const files = buildImageAttachments(response.images);
     const hasMedia = embeds.length > 0 || files.length > 0;
 
-    // 9b. Append usage line to the display text (with latency)
+    // 12b. Append usage line to the display text (with latency)
     let displayText = response.text;
     if (response.usage) {
       const usageLine = formatUsageLine(response.usage, durationMs);
       displayText = displayText ? `${displayText}\n${usageLine}` : usageLine;
     }
 
-    // 10. Reply — split text if necessary, attach images to the first message
+    // 13. Send reply — in thread if we created one, otherwise reply to original message
     const chunks = splitMessage(displayText);
+    const sendInTarget = "send" in replyTarget;
 
     for (let i = 0; i < chunks.length; i++) {
       if (i === 0) {
-        // First message: include text + any images
         const replyPayload: {
           content: string;
           embeds?: EmbedBuilder[];
@@ -429,10 +579,19 @@ export async function handleMessage(message: DiscordMessage): Promise<void> {
           if (files.length > 0) replyPayload.files = files;
         }
 
-        await message.reply(replyPayload);
+        if (shouldCreateThread && sendInTarget) {
+          // Send in thread (not as a reply — we're already in the thread context)
+          await (replyTarget as TextChannel | ThreadChannel).send(replyPayload);
+        } else if (isThread && sendInTarget) {
+          // In an existing thread, send directly (not as a reply to avoid clutter)
+          await (replyTarget as TextChannel | ThreadChannel).send(replyPayload);
+        } else {
+          // DMs or fallback: use message.reply
+          await message.reply(replyPayload);
+        }
       } else {
-        if ("send" in message.channel) {
-          await message.channel.send(chunks[i]);
+        if (sendInTarget) {
+          await (replyTarget as TextChannel | ThreadChannel).send(chunks[i]);
         }
       }
     }
@@ -445,7 +604,12 @@ export async function handleMessage(message: DiscordMessage): Promise<void> {
       } = {};
       if (embeds.length > 0) replyPayload.embeds = embeds;
       if (files.length > 0) replyPayload.files = files;
-      await message.reply(replyPayload);
+
+      if ((shouldCreateThread || isThread) && sendInTarget) {
+        await (replyTarget as TextChannel | ThreadChannel).send(replyPayload);
+      } else {
+        await message.reply(replyPayload);
+      }
     }
 
     const imageCount = response.images.length;
@@ -457,7 +621,7 @@ export async function handleMessage(message: DiscordMessage): Promise<void> {
       );
     }
     console.log(
-      `[bot] Replied to ${message.author.tag} in ${channelName} (session ${session.id})${imageCount > 0 ? ` with ${imageCount} image(s)` : ""}${isVoice ? " [voice]" : ""}`,
+      `[bot] Replied to ${message.author.tag} in ${channelName}${sessionThreadId ? ` (thread ${sessionThreadId})` : ""} (session ${session.id})${imageCount > 0 ? ` with ${imageCount} image(s)` : ""}${isVoice ? " [voice]" : ""}`,
     );
   } catch (err) {
     stopTyping();
@@ -478,9 +642,16 @@ export async function handleMessage(message: DiscordMessage): Promise<void> {
     });
 
     try {
-      await message.reply(
-        "Sorry, I ran into an error processing your message. Please try again.",
-      );
+      // Send error in the thread if we created one, otherwise reply to the original message
+      if ((shouldCreateThread || isThread) && "send" in replyTarget) {
+        await (replyTarget as TextChannel | ThreadChannel).send(
+          "Sorry, I ran into an error processing your message. Please try again.",
+        );
+      } else {
+        await message.reply(
+          "Sorry, I ran into an error processing your message. Please try again.",
+        );
+      }
     } catch {
       // If even the error reply fails, just log it
       console.error("[bot] Failed to send error reply");

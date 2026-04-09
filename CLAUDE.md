@@ -18,13 +18,15 @@ The dashboard SPA lives at `src/gateway/ui/` and builds to `dist/ui/`. Vite dev 
 
 This is a Discord bot that uses Claude as its AI backend. The system has nine major subsystems that initialize sequentially in `src/index.ts`:
 
-**Bot → Agent → Claude API pipeline**: Discord messages flow through `bot/messages.ts` (filter, session resolve, voice transcription, context build) → `agent/agent.ts` (system prompt assembly, tool loop with duplicate detection) → Anthropic SDK. The agent returns an `AgentResponse` with text, extracted images (from markdown `![](url)` syntax), and aggregated token usage. `messages.ts` renders images as Discord embeds (URLs) or attachments (local files), and stores usage data alongside the assistant message in SQLite. The agent has tools for memory search, Discord actions, skill reading, dangerous ops (bash, file I/O), and self-evolution (worktree + PR).
+**Bot → Agent → Claude API pipeline**: Discord messages flow through `bot/messages.ts` (filter, session resolve, thread creation, voice transcription, context build) → `agent/agent.ts` (system prompt assembly, tool loop with duplicate detection) → Anthropic SDK. The agent returns an `AgentResponse` with text, extracted images (from markdown `![](url)` syntax), and aggregated token usage. `messages.ts` renders images as Discord embeds (URLs) or attachments (local files), and stores usage data alongside the assistant message in SQLite. The agent has tools for memory search, Discord actions, skill reading, dangerous ops (bash, file I/O), and self-evolution (worktree + PR).
+
+**Thread-based replies**: In guild text channels, the bot always creates a new thread on the user's message and replies inside it. This ensures each conversation gets its own isolated context (no cross-conversation pollution). In bot-created threads, no @mention is required — the bot responds to all messages. Thread ownership is tracked in-memory with a fallback check on `thread.ownerId`. DMs continue to work without threads. The thread name is auto-generated from the first line of the user's message.
 
 **Token usage tracking**: Each assistant message in the `messages` table stores per-API-call token counts: `model`, `input_tokens`, `output_tokens`, `cache_creation_tokens`, `cache_read_tokens`. Usage is aggregated across all API calls within a single user→response turn (including tool-use loops). Costs are computed at query time (not stored) so pricing can be updated without migrating data. Query example: `SELECT model, SUM(input_tokens), SUM(output_tokens) FROM messages WHERE model IS NOT NULL GROUP BY model`.
 
 **Voice message transcription**: `audio/transcribe.ts` handles Discord voice DMs. When a message has the `IsVoiceMessage` flag or audio attachments (.ogg, .mp3, .wav, etc.), `messages.ts` downloads the audio and sends it to OpenAI's Whisper API for transcription. The transcribed text is then passed to the agent as the message content. Requires `OPENAI_API_KEY`. Gracefully degrades if not configured.
 
-**Session management**: Sessions are keyed by thread/channel/user/DM combination. `agent/sessions.ts` resolves the correct session and loads history from SQLite. Sessions auto-expire based on `SESSION_TTL_HOURS`.
+**Session management**: Sessions are keyed by thread/channel/user/DM combination. `agent/sessions.ts` resolves the correct session and loads history from SQLite. Sessions auto-expire based on `SESSION_TTL_HOURS`. Thread-based sessions use the `thread:<threadId>` key format, ensuring each thread has its own isolated conversation history.
 
 **Soul system**: Bot personality loaded from `data/SOUL.md` with filesystem watcher for hot-reload. Injected into every system prompt.
 
@@ -47,6 +49,7 @@ This is a Discord bot that uses Claude as its AI backend. The system has nine ma
 - **ESM throughout**: `"type": "module"` in package.json. All internal imports use `.js` extensions (NodeNext module resolution). Use `import.meta.url` / `fileURLToPath` for `__dirname`.
 - **Singleton services**: `getDb()`, `getSoul()`, `getSkillService()` are module-level singletons. The Discord client reference is passed via setter functions (`setDiscordClient`, `setMessageClient`) to avoid circular deps.
 - **Shared restart trigger**: `src/restart.ts` holds a callback set by `index.ts` and called by `commands.ts` / `api.ts` — avoids circular dependency between entry point and command handlers.
+- **Thread-first replies**: In guild text channels, every bot response creates a thread. Bot-created threads don't require @mentions for follow-up messages. Thread ownership is tracked in a `Set<string>` with a fallback to `thread.ownerId`. DMs bypass threading entirely.
 - **DM dedup**: `bot/client.ts` uses both `messageCreate` and a raw gateway event fallback for DMs, with a Set-based dedup mechanism (discord.js v14 sometimes misses DM events for uncached channels).
 - **All runtime data** lives in `data/` (gitignored): SQLite DB, SOUL.md, memory files, cron store, skills, migration markers.
 - **Evolution isolation**: `beta/` is a git worktree (gitignored). The running bot's source is never modified directly — all changes go through PRs.
