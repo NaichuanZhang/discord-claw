@@ -34,6 +34,8 @@ function normalizeJob(raw: Partial<CronJob> & { id: string }): CronJob {
 
 export class CronStore {
   private jobs: CronJob[] = [];
+  /** mtime of jobs.json when we last read it (ms). */
+  private lastMtimeMs = 0;
 
   /** Load jobs from disk (or create empty store). */
   load(): CronJob[] {
@@ -41,6 +43,7 @@ export class CronStore {
       const raw = fs.readFileSync(JOBS_PATH, "utf-8");
       const data: CronStoreData = JSON.parse(raw);
       this.jobs = (data.jobs ?? []).map(normalizeJob);
+      this.lastMtimeMs = this.getFileMtime();
       log(`Loaded ${this.jobs.length} job(s) from disk`);
     } catch (err: unknown) {
       if (isNodeError(err) && err.code === "ENOENT") {
@@ -54,6 +57,59 @@ export class CronStore {
     return this.jobs;
   }
 
+  /**
+   * Hot-reload: re-read jobs.json only if the file was modified externally
+   * since our last read/write. Returns true if new jobs were discovered.
+   *
+   * This is cheap — just a stat() call most of the time.
+   */
+  reload(): boolean {
+    const currentMtime = this.getFileMtime();
+    if (currentMtime === 0 || currentMtime <= this.lastMtimeMs) {
+      return false; // file unchanged (or missing)
+    }
+
+    log("jobs.json changed on disk, hot-reloading…");
+
+    let diskJobs: CronJob[];
+    try {
+      const raw = fs.readFileSync(JOBS_PATH, "utf-8");
+      const data: CronStoreData = JSON.parse(raw);
+      diskJobs = (data.jobs ?? []).map(normalizeJob);
+    } catch (err) {
+      log("Error reading jobs.json during hot-reload:", err);
+      return false;
+    }
+
+    this.lastMtimeMs = currentMtime;
+
+    // Build a map of existing in-memory jobs by ID so we can preserve runtime state
+    const existingById = new Map(this.jobs.map((j) => [j.id, j]));
+    let newJobCount = 0;
+
+    const merged: CronJob[] = diskJobs.map((diskJob) => {
+      const existing = existingById.get(diskJob.id);
+      if (existing) {
+        // Job already known — keep our runtime state, but accept
+        // updated config fields (name, schedule, payload, delivery, etc.)
+        return {
+          ...diskJob,
+          state: existing.state, // preserve runtime state
+        };
+      }
+      // Brand new job from disk
+      newJobCount++;
+      return diskJob;
+    });
+
+    this.jobs = merged;
+
+    if (newJobCount > 0) {
+      log(`Hot-reload: discovered ${newJobCount} new job(s)`);
+    }
+    return newJobCount > 0;
+  }
+
   /** Save current jobs to disk (atomic: write temp file, then rename). */
   save(): void {
     const data: CronStoreData = { version: 1, jobs: this.jobs };
@@ -61,6 +117,8 @@ export class CronStore {
     fs.mkdirSync(dir, { recursive: true });
     fs.writeFileSync(JOBS_TMP_PATH, JSON.stringify(data, null, 2), "utf-8");
     fs.renameSync(JOBS_TMP_PATH, JOBS_PATH);
+    // Update our mtime so we don't re-read our own write
+    this.lastMtimeMs = this.getFileMtime();
   }
 
   /** Get all jobs (in-memory). */
@@ -153,6 +211,19 @@ export class CronStore {
       return entries.slice(0, limit);
     }
     return entries;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Helpers
+  // ---------------------------------------------------------------------------
+
+  /** Get mtime of the jobs file in ms, or 0 if the file doesn't exist. */
+  private getFileMtime(): number {
+    try {
+      return fs.statSync(JOBS_PATH).mtimeMs;
+    } catch {
+      return 0;
+    }
   }
 }
 

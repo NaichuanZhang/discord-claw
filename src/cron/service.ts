@@ -223,6 +223,19 @@ export class CronService {
   private async tick(): Promise<void> {
     if (!this.running) return;
 
+    // Hot-reload: pick up any jobs added/changed externally on disk
+    const hasNewJobs = this.store.reload();
+    if (hasNewJobs) {
+      // Compute next run times for newly discovered jobs (those without a nextRunAtMs)
+      for (const job of this.store.getJobs()) {
+        if (!job.enabled) continue;
+        if (job.state.nextRunAtMs === undefined) {
+          const next = this.computeNextRun(job);
+          this.store.updateJobState(job.id, { nextRunAtMs: next });
+        }
+      }
+    }
+
     const now = Date.now();
     const dueJobs = this.store
       .getJobs()
