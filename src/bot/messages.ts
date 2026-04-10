@@ -235,24 +235,67 @@ async function transcribeVoiceMessage(
 // Thread creation helper
 // ---------------------------------------------------------------------------
 
-/** Maximum length for a Discord thread name */
+/** Target max length for thread names — keeps the sidebar clean */
+const THREAD_NAME_TARGET_LENGTH = 45;
+
+/** Absolute max (Discord's limit is 100) */
 const MAX_THREAD_NAME_LENGTH = 100;
 
 /**
- * Generate a short thread name from the user's message.
- * Uses the first line/sentence, truncated to Discord's limit.
+ * Generate a concise thread name from the user's message.
+ *
+ * Strategy:
+ * 1. Take the first line of the message
+ * 2. Strip filler words and common prefixes (e.g. "hey can you", "I want to")
+ * 3. Truncate at a word boundary to ~45 chars
+ * 4. Fall back to a generic name if nothing useful remains
+ *
+ * Examples:
+ *   "I don't want my discord to show the detailed threads on the side bar, how should I configure them?"
+ *     → "Hide threads from sidebar?"
+ *   ... well, we can't parse semantics without an LLM, so we do best-effort truncation:
+ *     → "I don't want my discord to show…"
  */
 function generateThreadName(userMessage: string, userName: string): string {
-  // Take first line or first 80 chars
+  // Take first line
   let name = userMessage.split("\n")[0].trim();
+
+  // Strip common leading filler patterns (case-insensitive)
+  // These are conversational openers that don't add meaning to a thread title
+  const fillerPatterns = [
+    /^(hey|hi|hello|yo|sup),?\s*/i,
+    /^@\w+\s*/,
+    /^(can you|could you|would you|please)\s+/i,
+  ];
+  for (const pattern of fillerPatterns) {
+    name = name.replace(pattern, "");
+  }
+
+  // Capitalize first letter after stripping
+  if (name.length > 0) {
+    name = name.charAt(0).toUpperCase() + name.slice(1);
+  }
 
   // If the message is very short or empty after stripping, use a generic name
   if (!name || name.length < 3) {
     name = `Chat with ${userName}`;
   }
 
-  // Truncate to Discord's limit (leave room for ellipsis)
-  if (name.length > MAX_THREAD_NAME_LENGTH - 1) {
+  // Truncate to target length at a word boundary
+  if (name.length > THREAD_NAME_TARGET_LENGTH) {
+    // Try to cut at a word boundary
+    const truncated = name.slice(0, THREAD_NAME_TARGET_LENGTH);
+    const lastSpace = truncated.lastIndexOf(" ");
+    if (lastSpace > THREAD_NAME_TARGET_LENGTH * 0.5) {
+      // Cut at last space if it's not too far back
+      name = truncated.slice(0, lastSpace) + "…";
+    } else {
+      name = truncated + "…";
+    }
+  }
+
+  // Final safety: hard cap at Discord's limit
+  if (name.length > MAX_THREAD_NAME_LENGTH) {
     name = name.slice(0, MAX_THREAD_NAME_LENGTH - 1) + "…";
   }
 
