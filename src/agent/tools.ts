@@ -79,6 +79,31 @@ export const discordTools = [
       required: ["channel_id"],
     },
   },
+  {
+    name: "create_thread",
+    description:
+      "Create a new thread in a Discord channel. Returns the thread's channel ID which you can then use with send_message to post inside it.",
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        channel_id: {
+          type: "string",
+          description: "Parent channel ID to create the thread in",
+        },
+        name: {
+          type: "string",
+          description:
+            "Thread name (max 100 characters, e.g. '4/10' for a date-based thread)",
+        },
+        message: {
+          type: "string",
+          description:
+            "Optional initial message to send in the thread. If omitted, creates an empty thread.",
+        },
+      },
+      required: ["channel_id", "name"],
+    },
+  },
 ];
 
 // ---------------------------------------------------------------------------
@@ -101,6 +126,9 @@ export function setDiscordClient(client: any): void {
 
 /** Discord's max file upload size for bots (default tier: 25 MB). */
 const MAX_FILE_SIZE_BYTES = 25 * 1024 * 1024;
+
+/** Discord's max thread name length. */
+const MAX_THREAD_NAME_LENGTH = 100;
 
 // ---------------------------------------------------------------------------
 // Tool handler
@@ -235,6 +263,44 @@ export async function handleDiscordTool(
           timestamp: msg.createdTimestamp,
         }));
         return JSON.stringify({ messages: formatted });
+      }
+
+      case "create_thread": {
+        const channelId = input.channel_id as string;
+        const threadName = (input.name as string).slice(
+          0,
+          MAX_THREAD_NAME_LENGTH,
+        );
+        const initialMessage = (input.message as string) || undefined;
+
+        console.log(
+          `[agent] create_thread -> channel ${channelId}, name "${threadName}"`,
+        );
+
+        const channel: any = await discordClient.channels.fetch(channelId);
+        if (!channel || !channel.threads) {
+          return JSON.stringify({
+            error: `Channel ${channelId} not found or doesn't support threads`,
+          });
+        }
+
+        const thread = await channel.threads.create({
+          name: threadName,
+          // ChannelType.PublicThread = 11
+          type: 11,
+        });
+
+        // Send initial message if provided
+        if (initialMessage) {
+          await thread.send(initialMessage);
+        }
+
+        return JSON.stringify({
+          success: true,
+          thread_id: thread.id,
+          thread_name: thread.name,
+          parent_channel_id: channelId,
+        });
       }
 
       default:

@@ -263,7 +263,7 @@ graph TB
     PM --> TL
     TL <-->|messages + tools| CLAUDE
     TL -->|memory_search, memory_get| MEM
-    TL -->|send_message, send_file, add_reaction| CL
+    TL -->|send_message, send_file, add_reaction, create_thread| CL
     TL -->|evolve_start, evolve_write, evolve_propose, evolve_merge| EVO
     EVO -->|git worktree, gh pr create| GH[GitHub]
     EVO --> DB
@@ -461,7 +461,7 @@ discordclaw/
 │   │   └── components.ts      # Button/select interaction handler
 │   ├── agent/                 # Claude integration
 │   │   ├── agent.ts           # Anthropic SDK wrapper, system prompt, tool loop + duplicate detection
-│   │   ├── tools.ts           # Discord tools (send_message, send_file, add_reaction, get_history)
+│   │   ├── tools.ts           # Discord tools (send_message, send_file, add_reaction, get_history, create_thread)
 │   │   ├── dangerous-tools.ts # Powerful tools: bash, read_file, write_file
 │   │   └── sessions.ts        # Per-thread/DM session tracking + TTL
 │   ├── audio/                 # Voice message handling

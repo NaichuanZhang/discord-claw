@@ -395,7 +395,7 @@ async function executeTool(
     result = handleMemoryTool(name, input);
   }
   // Discord tools are async
-  else if (name === "send_message" || name === "send_file" || name === "add_reaction" || name === "get_channel_history") {
+  else if (name === "send_message" || name === "send_file" || name === "add_reaction" || name === "get_channel_history" || name === "create_thread") {
     result = await handleDiscordTool(name, input);
   }
   // Skill tools are synchronous
@@ -781,7 +781,8 @@ export async function processAgentTurn(opts: {
           block.name === "send_message" ||
           block.name === "send_file" ||
           block.name === "add_reaction" ||
-          block.name === "get_channel_history"
+          block.name === "get_channel_history" ||
+          block.name === "create_thread"
         ) {
           result = await handleDiscordTool(
             block.name,
