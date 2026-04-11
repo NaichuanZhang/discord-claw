@@ -1,0 +1,25 @@
+{
+  "jobs": [
+    {
+      "id": "github-sponsor",
+      "schedule": "0 9 * * 1",
+      "channelId": "1361432275043647640",
+      "instruction": "Post a short, friendly reminder in the channel that people can sponsor the project on GitHub. Include the link: https://github.com/sponsors/NaichuanZhang. Keep it casual and vary the message each week.",
+      "state": {}
+    },
+    {
+      "id": "daily-reflection",
+      "schedule": "0 4 * * *",
+      "channelId": "1361432275043647640",
+      "instruction": "Do a daily reflection: review the last 24h of conversations, check memory for patterns, note what went well and what could improve. Post a brief summary in the channel. If you identify actionable improvements to your own capabilities, use evolve_suggest to record them.",
+      "state": {}
+    },
+    {
+      "id": "daily-food-thread",
+      "schedule": "0 5 * * *",
+      "channelId": "1492254579629359114",
+      "instruction": "1. Read memory file data/memory/food_log.md for user stats and recent patterns. 2. Use the Strava skill to pull today's activities and get exercise calories. 3. Calculate adjusted daily targets: base 1700 cal + (Strava exercise calories × 0.6 eat-back). Distribute extra calories as ~60% carbs, ~40% protein. 4. Create a new thread in the channel named with today's date (e.g. '4/11'). 5. Post an opening message with: today's calorie budget, macro targets (protein/carbs/fat), any Strava activities already logged, and a reminder to post meals for tracking.",
+      "state": {}
+    }
+  ]
+}

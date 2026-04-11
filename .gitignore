@@ -5,6 +5,7 @@ data/discordclaw.db
 data/discordclaw.db-shm
 data/discordclaw.db-wal
 data/cron/runs/
+data/cron/jobs.json
 data/skills/
 data/serve/
 .env

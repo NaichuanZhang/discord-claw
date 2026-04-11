@@ -100,6 +100,17 @@ if [ -d "$MIGRATION_DIR" ]; then
 fi
 
 # ---------------------------------------------------------------------------
+# 3.5. Seed cron jobs if not present
+# ---------------------------------------------------------------------------
+mkdir -p "$SCRIPT_DIR/data/cron"
+if [ ! -f "$SCRIPT_DIR/data/cron/jobs.json" ]; then
+  if [ -f "$SCRIPT_DIR/data/cron/jobs.seed.json" ]; then
+    echo "[start] Seeding cron jobs from jobs.seed.json..."
+    cp "$SCRIPT_DIR/data/cron/jobs.seed.json" "$SCRIPT_DIR/data/cron/jobs.json"
+  fi
+fi
+
+# ---------------------------------------------------------------------------
 # 4. Build
 # ---------------------------------------------------------------------------
 echo "[start] Building..."
