@@ -301,20 +301,25 @@ export class CronService {
         );
       }
 
-      // Deliver result to Discord — use configured delivery or fall back to admin DM
-      const delivery = this.resolveDelivery(job);
-      if (delivery && result !== undefined) {
-        if (this.sendToDiscord) {
-          await this.sendToDiscord(
-            delivery.channelId,
-            result,
-            delivery.mentionUser,
-          );
-        } else {
-          log(`Warning: delivery target available for job ${job.id} but no Discord send callback`);
+      // Deliver result to Discord — but ONLY for systemEvent jobs.
+      // agentTurn jobs handle their own delivery via tools (create_thread,
+      // send_message, etc.), so posting the result here would duplicate
+      // content outside the thread the agent created.
+      if (job.payload.kind !== "agentTurn") {
+        const delivery = this.resolveDelivery(job);
+        if (delivery && result !== undefined) {
+          if (this.sendToDiscord) {
+            await this.sendToDiscord(
+              delivery.channelId,
+              result,
+              delivery.mentionUser,
+            );
+          } else {
+            log(`Warning: delivery target available for job ${job.id} but no Discord send callback`);
+          }
+        } else if (result !== undefined && !delivery) {
+          log(`Warning: job ${job.id} produced output but no delivery target and no admin DM fallback`);
         }
-      } else if (result !== undefined && !delivery) {
-        log(`Warning: job ${job.id} produced output but no delivery target and no admin DM fallback`);
       }
 
       // Update state on success
