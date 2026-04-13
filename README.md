@@ -432,6 +432,351 @@ graph LR
     API --> CRON
 ```
 
+### Voice Assistant Pipeline
+
+The voice assistant is the most complex real-time data flow in the system. It processes live audio from Discord voice channels through a multi-stage pipeline: audio capture → speech detection → transcription → AI reasoning → speech synthesis → playback — all while handling interruptions and concurrent user streams.
+
+#### High-Level Pipeline
+
+```mermaid
+graph LR
+    subgraph "🎤 Capture"
+        A1[Discord Opus Stream]
+        A2[Opus Decode]
+        A3[Downsample<br/>48kHz → 16kHz mono]
+    end
+
+    subgraph "🧠 Detect"
+        B1[Silero VAD<br/>ONNX v4]
+        B2{Speech<br/>prob > 0.5?}
+        B3[Silence Timer<br/>1500ms]
+    end
+
+    subgraph "📝 Understand"
+        C1[Concatenate PCM<br/>Chunks]
+        C2[Encode WAV<br/>16kHz mono]
+        C3[EigenAI Whisper<br/>V3 Turbo]
+    end
+
+    subgraph "🤖 Think"
+        D1[Voice Agent<br/>Claude Sonnet]
+        D2[Memory Tools<br/>search / get]
+    end
+
+    subgraph "🔊 Speak"
+        E1[EigenAI Chatterbox<br/>TTS]
+        E2[AudioPlayer<br/>discord.js]
+    end
+
+    A1 --> A2 --> A3
+    A3 -->|Float32 frames| B1
+    A3 -->|Int16 chunks| C1
+    B1 --> B2
+    B2 -->|Yes| B3
+    B2 -->|No speech| B1
+    B3 -->|Timeout| C1
+    C1 --> C2 --> C3
+    C3 -->|text| D1
+    D1 <-->|tool calls| D2
+    D1 -->|response text| E1
+    E1 -->|WAV buffer| E2
+```
+
+#### Detailed Sequence: Full Utterance Lifecycle
+
+```mermaid
+sequenceDiagram
+    participant U as Discord User
+    participant DC as Discord Gateway
+    participant CMD as /join Command
+    participant CONN as connection.ts
+    participant RECV as receiver.ts
+    participant VAD as vad.ts<br/>(Silero ONNX)
+    participant ORCH as index.ts<br/>(Orchestrator)
+    participant STT as stt.ts<br/>(EigenAI Whisper)
+    participant AGT as agent.ts<br/>(Claude Sonnet)
+    participant MEM as Memory System
+    participant TTS as tts.ts<br/>(EigenAI Chatterbox)
+    participant AP as AudioPlayer
+
+    Note over CMD,CONN: ── Initialization ──
+
+    U->>CMD: /join
+    CMD->>CONN: joinChannel(voiceChannel)
+    CONN->>DC: joinVoiceChannel(channelId, guildId)
+    DC-->>CONN: VoiceConnectionStatus.Ready
+    CONN-->>CMD: VoiceConnection
+    CMD->>ORCH: startVoice(channel)
+    ORCH->>AP: connection.subscribe(audioPlayer)
+    ORCH->>ORCH: Start idle timer (10 min)
+
+    Note over U,AP: ── User Speaks ──
+
+    U->>DC: Speaks into mic
+    DC->>ORCH: speaking:start(userId)
+    ORCH->>ORCH: Initialize UserUtteranceState
+    ORCH->>RECV: subscribeToUser(connection, userId)
+    RECV->>RECV: receiver.subscribe(userId, AfterSilence 5s)
+
+    Note over RECV: Auto-detect mono vs stereo<br/>on first opus packet
+
+    loop Every 20ms Opus Packet
+        DC->>RECV: opus packet (48kHz)
+        RECV->>RECV: decodeOpus(packet, channels)
+        RECV->>ORCH: onRawPcm(Int16Array)
+        RECV->>RECV: downsampleToMono16k(pcm48k)
+        RECV->>ORCH: onFrame(Float32Array)
+
+        ORCH->>ORCH: Accumulate into VAD frame buffer
+
+        opt VAD frame buffer full (480 samples = 30ms)
+            ORCH->>VAD: process(frame)
+            VAD-->>ORCH: probability [0.0-1.0]
+
+            alt prob > 0.5 (speech detected)
+                Note over ORCH: If first speech frame:<br/>set isSpeaking=true,<br/>start buffering rawChunks
+                opt Bot is currently playing
+                    ORCH->>AP: stop() — interrupt!
+                    Note over AP: ⚡ Playback cut off
+                end
+                ORCH->>ORCH: Reset silence timer
+                ORCH->>ORCH: Buffer rawChunks += pcm
+            else prob ≤ 0.5 (silence) AND isSpeaking
+                opt No active silence timer
+                    ORCH->>ORCH: Start silence timer (1500ms)
+                end
+            end
+        end
+    end
+
+    Note over U,AP: ── Utterance Complete ──
+
+    ORCH->>ORCH: Silence timer fires → onUtteranceComplete()
+
+    alt utterance < 500ms
+        ORCH->>ORCH: Discard (too short — noise/cough)
+    else already processing another utterance
+        ORCH->>ORCH: Skip (no queue yet)
+    else valid utterance
+        ORCH->>ORCH: processing = true
+
+        Note over ORCH,STT: Step 1/5: Prepare Audio
+        ORCH->>ORCH: Concatenate rawChunks → Int16Array
+        ORCH->>RECV: downsampleToMono16kInt16(rawPcm, channels)
+        RECV-->>ORCH: mono 16kHz Int16Array
+        ORCH->>VAD: reset() — clear LSTM hidden states
+
+        Note over ORCH,STT: Step 2/5: Speech-to-Text
+        ORCH->>STT: transcribe(mono16kPcm)
+        STT->>STT: encodeWav(samples, 16000)
+        STT->>STT: POST /api/v1/generate<br/>(model: whisper_v3_turbo)
+        STT-->>ORCH: transcribed text
+
+        alt empty transcription
+            ORCH->>ORCH: Skip — nothing detected
+        else has text
+            Note over ORCH,AGT: Step 3/5: AI Response
+            ORCH->>ORCH: getUserDisplayName(userId)
+            ORCH->>AGT: processVoiceUtterance(text, userName)
+            AGT->>AGT: Build system prompt<br/>(voice rules + soul brief + time + speaker)
+            AGT->>AGT: Append to ephemeral voiceHistory (max 10 turns)
+            AGT->>AGT: Claude messages.create()<br/>(model, 512 max_tokens, memory tools)
+
+            opt Claude requests tool_use
+                AGT->>MEM: handleMemoryTool(name, input)
+                MEM-->>AGT: tool result
+                AGT->>AGT: Follow-up Claude call<br/>(one round only — keep it fast)
+            end
+
+            AGT-->>ORCH: response text (1-3 sentences, no markdown)
+
+            Note over ORCH,AP: Step 4/5: Text-to-Speech
+            ORCH->>TTS: synthesize(responseText)
+            TTS->>TTS: POST /api/chatterbox<br/>(JSON: {text})
+            TTS-->>ORCH: WAV audio buffer
+
+            Note over ORCH,AP: Step 5/5: Playback
+            ORCH->>AP: play(audioResource)
+            AP-->>ORCH: AudioPlayerStatus.Idle
+
+            ORCH->>ORCH: processing = false
+        end
+    end
+
+    Note over U,AP: ── Cleanup ──
+
+    alt Idle timeout (10 min no activity)
+        ORCH->>ORCH: stopVoice()
+        ORCH->>AGT: clearVoiceHistory()
+        ORCH->>CONN: leaveChannel()
+        CONN->>DC: connection.destroy()
+    else User runs /leave
+        CMD->>ORCH: stopVoice()
+        ORCH->>AGT: clearVoiceHistory()
+        ORCH->>CONN: leaveChannel()
+    else Opus stream ends
+        RECV->>ORCH: onStreamEnd()
+        ORCH->>ORCH: Complete pending utterance
+        ORCH->>ORCH: Clean up userState<br/>(re-subscribe on next speaking:start)
+    end
+```
+
+#### Audio Format Transformations
+
+```mermaid
+graph TD
+    subgraph "Discord Input"
+        I1["Opus packets<br/>48kHz, mono or stereo<br/>20ms frames"]
+    end
+
+    subgraph "Decode (receiver.ts)"
+        D1["OpusEncoder.decode()<br/>→ PCM Int16<br/>48kHz, 960 or 1920 samples/frame"]
+    end
+
+    subgraph "Dual Output Path"
+        direction LR
+        P1["<b>VAD Path</b><br/>downsampleToMono16k()<br/>→ Float32 [-1.0, 1.0]<br/>16kHz mono, 320 samples/frame"]
+        P2["<b>Buffer Path</b><br/>Raw Int16 chunks<br/>48kHz, original channels<br/>accumulated while speaking"]
+    end
+
+    subgraph "STT Preparation"
+        S1["Concatenate raw chunks<br/>→ single Int16Array"]
+        S2["downsampleToMono16kInt16()<br/>→ Int16, 16kHz mono"]
+        S3["encodeWav()<br/>→ WAV file buffer<br/>44-byte header + PCM data"]
+    end
+
+    subgraph "STT API"
+        A1["EigenAI Whisper V3 Turbo<br/>multipart/form-data POST<br/>→ JSON { text }"]
+    end
+
+    subgraph "TTS Output"
+        T1["EigenAI Chatterbox<br/>JSON POST { text }<br/>→ WAV audio buffer"]
+    end
+
+    subgraph "Playback"
+        PL1["Readable.from(wavBuffer)<br/>→ createAudioResource()<br/>StreamType.Arbitrary"]
+    end
+
+    I1 --> D1
+    D1 --> P1
+    D1 --> P2
+    P1 -->|"30ms frames"| VAD["Silero VAD<br/>ONNX inference"]
+    P2 -->|"on utterance complete"| S1
+    S1 --> S2 --> S3
+    S3 --> A1
+    A1 -->|"text"| Claude["Claude Sonnet<br/>→ spoken response"]
+    Claude -->|"text"| T1
+    T1 --> PL1
+    PL1 --> Speaker["🔊 Discord Voice Channel"]
+```
+
+#### VAD State Machine
+
+```mermaid
+stateDiagram-v2
+    [*] --> Listening: speaking:start event
+
+    Listening --> SpeechDetected: VAD prob > 0.5
+    Listening --> Listening: VAD prob ≤ 0.5
+
+    SpeechDetected --> SpeechDetected: VAD prob > 0.5<br/>(reset silence timer)
+    SpeechDetected --> SilenceTimer: VAD prob ≤ 0.5<br/>(start 1500ms timer)
+
+    SilenceTimer --> SpeechDetected: VAD prob > 0.5<br/>(cancel timer)
+    SilenceTimer --> UtteranceComplete: Timer expires
+
+    UtteranceComplete --> Discarded: duration < 500ms
+    UtteranceComplete --> Skipped: already processing
+    UtteranceComplete --> Pipeline: valid utterance
+
+    Discarded --> Listening
+    Skipped --> Listening
+
+    Pipeline --> STT: transcribe audio
+    STT --> AgentThink: text received
+    STT --> Listening: empty transcription
+    AgentThink --> TTS: response generated
+    TTS --> Playing: audio synthesized
+    Playing --> Listening: playback complete
+
+    state "Interruption" as INT {
+        [*] --> CheckPlaying
+        CheckPlaying --> StopPlayer: bot is playing
+        StopPlayer --> [*]: audioPlayer.stop()
+    }
+
+    SpeechDetected --> INT: new speech starts\nwhile bot playing
+    INT --> SpeechDetected
+
+    Listening --> [*]: stream ends / leave / idle timeout
+```
+
+#### Source File Responsibilities
+
+```mermaid
+graph TB
+    subgraph "voice/index.ts — Orchestrator"
+        INIT[initVoice / startVoice / stopVoice]
+        STATE["Per-user state management<br/>UserUtteranceState map"]
+        PIPELINE["5-step pipeline orchestration<br/>Audio → STT → Agent → TTS → Play"]
+        INTERRUPT["Interruption handling<br/>audioPlayer.stop on new speech"]
+        IDLE["Idle timeout (10 min)<br/>auto-disconnect"]
+    end
+
+    subgraph "voice/connection.ts"
+        JOIN["joinChannel(VoiceBasedChannel)<br/>joinVoiceChannel + entersState(Ready)"]
+        LEAVE["leaveChannel()<br/>connection.destroy()"]
+        LIFECYCLE["Connection state tracking<br/>Disconnected / Destroyed handlers"]
+    end
+
+    subgraph "voice/receiver.ts"
+        SUBSCRIBE["subscribeToUser()<br/>opus stream subscription"]
+        DECODE["decodeOpus(packet, channels)<br/>@discordjs/opus"]
+        DETECT["Auto-detect mono vs stereo<br/>first-packet heuristic"]
+        DS_FLOAT["downsampleToMono16k()<br/>48kHz Int16 → 16kHz Float32"]
+        DS_INT["downsampleToMono16kInt16()<br/>48kHz Int16 → 16kHz Int16"]
+    end
+
+    subgraph "voice/vad.ts"
+        VAD_INIT["SileroVAD.init()<br/>Load ONNX model (v4, ~2MB)"]
+        VAD_PROC["process(frame)<br/>480 samples → probability"]
+        VAD_RESET["reset()<br/>Clear LSTM h/c states"]
+    end
+
+    subgraph "voice/stt.ts"
+        WAV["encodeWav(samples, sampleRate)<br/>44-byte header + PCM"]
+        TRANSCRIBE["transcribe(pcm16kMono)<br/>POST to EigenAI Whisper V3 Turbo"]
+    end
+
+    subgraph "voice/agent.ts"
+        VOICE_PROMPT["Voice system prompt<br/>1-3 sentences, no markdown"]
+        HISTORY["Ephemeral voice history<br/>max 10 turns"]
+        PROCESS["processVoiceUtterance(text, userName)<br/>Claude Sonnet + memory tools"]
+        CLEAR["clearVoiceHistory()<br/>reset on disconnect"]
+    end
+
+    subgraph "voice/tts.ts"
+        SYNTH["synthesize(text)<br/>POST to EigenAI Chatterbox<br/>→ WAV buffer"]
+    end
+
+    INIT --> JOIN
+    INIT --> SUBSCRIBE
+    INIT --> VAD_INIT
+    STATE --> PIPELINE
+    PIPELINE --> DS_INT
+    PIPELINE --> TRANSCRIBE
+    PIPELINE --> PROCESS
+    PIPELINE --> SYNTH
+    SUBSCRIBE --> DECODE
+    DECODE --> DETECT
+    DECODE --> DS_FLOAT
+    PROCESS --> VOICE_PROMPT
+    PROCESS --> HISTORY
+    IDLE --> LEAVE
+    IDLE --> CLEAR
+    INTERRUPT -.->|"audioPlayer.stop()"| SYNTH
+```
+
 ### Evolution Flow
 
 ```mermaid
