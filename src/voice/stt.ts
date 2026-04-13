@@ -68,6 +68,9 @@ export async function transcribe(pcm16kMono: Int16Array): Promise<string> {
 
   // Encode as WAV
   const wavBuffer = encodeWav(pcm16kMono, VAD_SAMPLE_RATE);
+  const durationSec = pcm16kMono.length / VAD_SAMPLE_RATE;
+
+  console.log(`[stt] Sending ${durationSec.toFixed(1)}s audio (${wavBuffer.length} bytes WAV) to ${EIGENAI_MODEL}`);
 
   // Build multipart form data
   const formData = new FormData();
@@ -88,6 +91,7 @@ export async function transcribe(pcm16kMono: Int16Array): Promise<string> {
 
   if (!response.ok) {
     const errText = await response.text().catch(() => "unknown error");
+    console.error(`[stt] ❌ API error ${response.status}: ${errText}`);
     throw new Error(`EigenAI STT failed (${response.status}): ${errText}`);
   }
 
@@ -95,7 +99,7 @@ export async function transcribe(pcm16kMono: Int16Array): Promise<string> {
   const elapsed = Date.now() - startTime;
   const text = (data.text ?? "").trim();
 
-  console.log(`[stt] Transcribed in ${elapsed}ms: "${text.slice(0, 100)}"`);
+  console.log(`[stt] ✅ Transcribed in ${elapsed}ms (${durationSec.toFixed(1)}s audio): "${text}"`);
 
   return text;
 }
