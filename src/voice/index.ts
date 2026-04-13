@@ -60,7 +60,7 @@ let discordClient: Client | null = null;
 
 // Per-user utterance state
 interface UserUtteranceState {
-  /** Accumulated raw PCM (48kHz stereo) chunks for the current utterance */
+  /** Accumulated raw PCM chunks for the current utterance */
   rawChunks: Int16Array[];
   /** Total raw samples accumulated */
   totalRawSamples: number;
@@ -159,7 +159,7 @@ export async function startVoice(channel: VoiceBasedChannel): Promise<void> {
       userId,
       // onFrame: downsampled 16kHz mono Float32 for VAD
       (frame: Float32Array) => handleVadFrame(userId, frame),
-      // onRawPcm: 48kHz stereo Int16 for buffering
+      // onRawPcm: raw PCM for buffering
       (pcm: Int16Array) => handleRawPcm(userId, pcm),
       // onStreamEnd: clean up so re-subscription can happen
       () => handleStreamEnd(userId),
@@ -386,6 +386,10 @@ async function onUtteranceComplete(userId: string): Promise<void> {
     return;
   }
 
+  // Get the detected channel count from the user's audio stream
+  const stream = userStreams.get(userId);
+  const channels: 1 | 2 = stream?.channels ?? 2;
+
   // Reset VAD state for fresh detection
   vad?.reset();
 
@@ -402,11 +406,11 @@ async function onUtteranceComplete(userId: string): Promise<void> {
       writeOffset += chunk.length;
     }
 
-    // 2. Downsample to 16kHz mono Int16 for STT
-    const mono16k = downsampleToMono16kInt16(rawPcm);
+    // 2. Downsample to 16kHz mono Int16 for STT (using detected channel count)
+    const mono16k = downsampleToMono16kInt16(rawPcm, channels);
 
     const durationSec = mono16k.length / 16000;
-    console.log(`[voice] 📝 Step 1/5: Audio ready — ${durationSec.toFixed(1)}s, ${totalSamples} raw samples → ${mono16k.length} mono16k samples`);
+    console.log(`[voice] 📝 Step 1/5: Audio ready — ${durationSec.toFixed(1)}s, ${totalSamples} raw samples → ${mono16k.length} mono16k samples (${channels}ch)`);
 
     // 3. STT
     console.log(`[voice] 📝 Step 2/5: Transcribing (STT)...`);

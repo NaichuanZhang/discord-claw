@@ -1,7 +1,9 @@
 /**
  * Audio receiver — subscribes to user audio streams from a VoiceConnection,
- * decodes opus to PCM, and downsamples from 48kHz stereo to 16kHz mono
- * for VAD and STT processing.
+ * decodes opus to PCM, and downsamples to 16kHz mono for VAD and STT processing.
+ *
+ * Discord user audio streams can be either mono or stereo depending on the
+ * client. We auto-detect the format on the first packet and adapt accordingly.
  */
 
 import type { VoiceConnection } from "@discordjs/voice";
@@ -12,9 +14,8 @@ const { OpusEncoder } = opus;
 // Constants
 // ---------------------------------------------------------------------------
 
-/** Discord sends 48kHz stereo opus */
+/** Discord sends 48kHz opus */
 const DISCORD_SAMPLE_RATE = 48000;
-const DISCORD_CHANNELS = 2;
 
 /** Silero VAD expects 16kHz mono */
 export const VAD_SAMPLE_RATE = 16000;
@@ -23,54 +24,80 @@ export const VAD_CHANNELS = 1;
 /** Frame duration in ms — Discord sends 20ms opus frames */
 const FRAME_DURATION_MS = 20;
 
+/** Expected samples per 20ms frame at 48kHz */
+const MONO_FRAME_SAMPLES = 960;   // 48000 * 0.020
+const STEREO_FRAME_SAMPLES = 1920; // 48000 * 0.020 * 2
+
 // ---------------------------------------------------------------------------
-// Opus decoder
+// Opus decoders — one for each channel configuration
 // ---------------------------------------------------------------------------
 
-const opusDecoder = new OpusEncoder(DISCORD_SAMPLE_RATE, DISCORD_CHANNELS);
+const opusDecoderMono = new OpusEncoder(DISCORD_SAMPLE_RATE, 1);
+const opusDecoderStereo = new OpusEncoder(DISCORD_SAMPLE_RATE, 2);
 
 // ---------------------------------------------------------------------------
 // Audio processing
 // ---------------------------------------------------------------------------
 
 /**
- * Decode an opus packet to PCM Int16 (48kHz stereo).
+ * Decode an opus packet to PCM Int16.
+ * Auto-detects mono vs stereo by trying stereo first, then falling back.
  */
-export function decodeOpus(opusPacket: Buffer): Int16Array {
-  const pcmBuffer = opusDecoder.decode(opusPacket);
+export function decodeOpus(opusPacket: Buffer, channels: 1 | 2): Int16Array {
+  const decoder = channels === 2 ? opusDecoderStereo : opusDecoderMono;
+  const pcmBuffer = decoder.decode(opusPacket);
   return new Int16Array(pcmBuffer.buffer, pcmBuffer.byteOffset, pcmBuffer.byteLength / 2);
 }
 
 /**
- * Downsample from 48kHz stereo Int16 to 16kHz mono Float32.
- * Simple approach: take every 3rd sample from left channel (48k/3 = 16k),
- * stepping by 2 for stereo interleaving (so step = 6).
+ * Downsample from 48kHz Int16 to 16kHz mono Float32.
+ * Handles both mono and stereo input.
  */
-export function downsampleToMono16k(pcm48kStereo: Int16Array): Float32Array {
+export function downsampleToMono16k(pcm48k: Int16Array, channels: 1 | 2): Float32Array {
   const ratio = DISCORD_SAMPLE_RATE / VAD_SAMPLE_RATE; // 3
-  const step = ratio * DISCORD_CHANNELS; // 6
-  const outputLength = Math.floor(pcm48kStereo.length / step);
+  const step = ratio * channels; // 3 for mono, 6 for stereo
+  const outputLength = Math.floor(pcm48k.length / step);
   const output = new Float32Array(outputLength);
 
-  for (let i = 0; i < outputLength; i++) {
-    // Convert Int16 [-32768, 32767] to Float32 [-1.0, 1.0]
-    output[i] = pcm48kStereo[i * step] / 32768;
+  if (channels === 1) {
+    // Mono: just take every 3rd sample
+    for (let i = 0; i < outputLength; i++) {
+      output[i] = pcm48k[i * step] / 32768;
+    }
+  } else {
+    // Stereo: average L+R channels, then downsample
+    for (let i = 0; i < outputLength; i++) {
+      const baseIdx = i * step;
+      const left = pcm48k[baseIdx];
+      const right = pcm48k[baseIdx + 1];
+      output[i] = ((left + right) / 2) / 32768;
+    }
   }
 
   return output;
 }
 
 /**
- * Convert PCM 48kHz stereo Int16 to 16kHz mono Int16 (for WAV encoding).
+ * Convert PCM 48kHz Int16 to 16kHz mono Int16 (for WAV encoding / STT).
+ * Handles both mono and stereo input.
  */
-export function downsampleToMono16kInt16(pcm48kStereo: Int16Array): Int16Array {
+export function downsampleToMono16kInt16(pcm48k: Int16Array, channels: 1 | 2): Int16Array {
   const ratio = DISCORD_SAMPLE_RATE / VAD_SAMPLE_RATE;
-  const step = ratio * DISCORD_CHANNELS;
-  const outputLength = Math.floor(pcm48kStereo.length / step);
+  const step = ratio * channels;
+  const outputLength = Math.floor(pcm48k.length / step);
   const output = new Int16Array(outputLength);
 
-  for (let i = 0; i < outputLength; i++) {
-    output[i] = pcm48kStereo[i * step];
+  if (channels === 1) {
+    for (let i = 0; i < outputLength; i++) {
+      output[i] = pcm48k[i * step];
+    }
+  } else {
+    for (let i = 0; i < outputLength; i++) {
+      const baseIdx = i * step;
+      const left = pcm48k[baseIdx];
+      const right = pcm48k[baseIdx + 1];
+      output[i] = Math.round((left + right) / 2);
+    }
   }
 
   return output;
@@ -84,8 +111,10 @@ export interface UserAudioStream {
   userId: string;
   /** Callback when we receive a decoded + downsampled audio frame */
   onFrame: (frame: Float32Array) => void;
-  /** Callback when the raw PCM (48kHz stereo) is available for buffering */
+  /** Callback when the raw PCM is available for buffering */
   onRawPcm: (pcm: Int16Array) => void;
+  /** Detected channel count for this stream */
+  channels: 1 | 2;
   /** Stop listening */
   destroy: () => void;
 }
@@ -93,6 +122,9 @@ export interface UserAudioStream {
 /**
  * Subscribe to a user's audio stream from a voice connection.
  * Decodes opus and downsamples to 16kHz mono for VAD processing.
+ *
+ * Auto-detects mono vs stereo on the first decoded packet based on
+ * the number of samples returned.
  *
  * @param onStreamEnd - Called when the opus stream ends/closes, so the caller
  *   can clean up and allow re-subscription on the next speaking:start event.
@@ -106,15 +138,10 @@ export function subscribeToUser(
 ): UserAudioStream {
   const receiver = connection.receiver;
 
-  // Subscribe to the user's audio — get opus packets.
-  // Use a generous AfterSilence duration so the stream stays alive during
-  // natural speech pauses. Our own VAD + silence timer handles utterance
-  // boundary detection, so we just need the opus stream to keep feeding us
-  // data as long as the user is reasonably active.
   const opusStream = receiver.subscribe(userId, {
     end: {
       behavior: 1, // AfterSilence
-      duration: 5000, // 5 seconds — much more forgiving than 100ms
+      duration: 5000, // 5 seconds
     },
   });
 
@@ -122,24 +149,95 @@ export function subscribeToUser(
   let decodeErrors = 0;
   let ended = false;
 
+  // Auto-detect channels on first packet. Default to stereo but will
+  // correct on first decode.
+  let detectedChannels: 1 | 2 = 2;
+  let channelsDetected = false;
+
   const handleData = (packet: Buffer) => {
     try {
       packetCount++;
 
-      // Log first packet and every 250th (~5 seconds of audio)
+      // On the first packet, try to detect mono vs stereo
+      if (!channelsDetected) {
+        // Try decoding as stereo first
+        const stereoPcm = decodeOpus(packet, 2);
+
+        // 20ms at 48kHz stereo = 1920 samples, mono = 960 samples
+        // But the decoder always returns samples based on configured channels,
+        // so we need a different approach: check if the audio has energy
+        // Try both decoders and see which produces non-silent audio
+        const monoPcm = decodeOpus(packet, 1);
+
+        // Calculate RMS for each
+        let stereoRms = 0;
+        for (let i = 0; i < Math.min(stereoPcm.length, 100); i++) {
+          stereoRms += stereoPcm[i] * stereoPcm[i];
+        }
+        stereoRms = Math.sqrt(stereoRms / Math.min(stereoPcm.length, 100));
+
+        let monoRms = 0;
+        for (let i = 0; i < Math.min(monoPcm.length, 100); i++) {
+          monoRms += monoPcm[i] * monoPcm[i];
+        }
+        monoRms = Math.sqrt(monoRms / Math.min(monoPcm.length, 100));
+
+        console.log(`[voice:recv] Channel detection for ${userId}: stereo(${stereoPcm.length} samples, rms=${stereoRms.toFixed(1)}), mono(${monoPcm.length} samples, rms=${monoRms.toFixed(1)})`);
+
+        // If stereo decode gives 1920 samples (expected), use stereo.
+        // If it gives 960, it's actually mono.
+        // Also: if mono RMS is much higher, the stream is likely mono.
+        if (stereoPcm.length === MONO_FRAME_SAMPLES) {
+          detectedChannels = 1;
+          console.log(`[voice:recv] Detected MONO stream for ${userId} (stereo decode returned ${stereoPcm.length} samples, expected ${STEREO_FRAME_SAMPLES})`);
+        } else if (monoRms > stereoRms * 2 && monoRms > 100) {
+          detectedChannels = 1;
+          console.log(`[voice:recv] Detected MONO stream for ${userId} (mono RMS ${monoRms.toFixed(1)} >> stereo RMS ${stereoRms.toFixed(1)})`);
+        } else {
+          detectedChannels = 2;
+          console.log(`[voice:recv] Detected STEREO stream for ${userId} (${stereoPcm.length} samples)`);
+        }
+
+        channelsDetected = true;
+        // Update the stream object's channels field
+        stream.channels = detectedChannels;
+
+        // Log the first few PCM values for debugging
+        const pcm = detectedChannels === 2 ? stereoPcm : monoPcm;
+        const sampleValues = Array.from(pcm.slice(0, 20)).join(', ');
+        console.log(`[voice:recv] First 20 PCM samples (${detectedChannels}ch): [${sampleValues}]`);
+
+        // Process this first packet
+        const frame16k = downsampleToMono16k(pcm, detectedChannels);
+        const f32Samples = Array.from(frame16k.slice(0, 10)).map(v => v.toFixed(4)).join(', ');
+        console.log(`[voice:recv] First 10 VAD frame values: [${f32Samples}]`);
+
+        onRawPcm(pcm);
+        onFrame(frame16k);
+        return;
+      }
+
+      // Normal packet processing
       if (packetCount === 1) {
         console.log(`[voice:recv] First opus packet from ${userId}: ${packet.length} bytes`);
       } else if (packetCount % 250 === 0) {
         console.log(`[voice:recv] Opus packets from ${userId}: ${packetCount} received, ${decodeErrors} decode errors`);
       }
 
-      // Decode opus to PCM
-      const pcm48k = decodeOpus(packet);
-      // Pass raw PCM for buffering
+      const pcm48k = decodeOpus(packet, detectedChannels);
       onRawPcm(pcm48k);
-      // Downsample for VAD
-      const frame16k = downsampleToMono16k(pcm48k);
+      const frame16k = downsampleToMono16k(pcm48k, detectedChannels);
       onFrame(frame16k);
+
+      // Log audio level periodically (every 50 packets = ~1 second)
+      if (packetCount % 50 === 0) {
+        let rms = 0;
+        for (let i = 0; i < pcm48k.length; i++) {
+          rms += pcm48k[i] * pcm48k[i];
+        }
+        rms = Math.sqrt(rms / pcm48k.length);
+        console.log(`[voice:recv] Audio level for ${userId} at packet #${packetCount}: rms=${rms.toFixed(1)}, channels=${detectedChannels}`);
+      }
     } catch (err) {
       decodeErrors++;
       if (decodeErrors <= 3) {
@@ -170,5 +268,6 @@ export function subscribeToUser(
     opusStream.destroy();
   };
 
-  return { userId, onFrame, onRawPcm: onRawPcm, destroy };
+  const stream: UserAudioStream = { userId, onFrame, onRawPcm, channels: detectedChannels, destroy };
+  return stream;
 }
