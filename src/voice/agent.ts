@@ -91,6 +91,9 @@ export async function processVoiceUtterance(
 ): Promise<string> {
   const startTime = Date.now();
 
+  console.log(`[voice-agent] Processing utterance from ${userName}: "${text}"`);
+  console.log(`[voice-agent] Voice history: ${voiceHistory.length} turns, model: ${getVoiceModel()}`);
+
   // Build system prompt with soul
   const systemParts: string[] = [VOICE_SYSTEM_PROMPT];
   const soul = getSoul();
@@ -123,6 +126,7 @@ export async function processVoiceUtterance(
   // Call Claude
   const collectedText: string[] = [];
 
+  console.log(`[voice-agent] Calling Claude (${messages.length} messages)...`);
   const response = await client.messages.create({
     model: getVoiceModel(),
     max_tokens: VOICE_MAX_TOKENS,
@@ -131,10 +135,15 @@ export async function processVoiceUtterance(
     tools: voiceTools,
   });
 
+  console.log(`[voice-agent] Claude response: stop_reason=${response.stop_reason}, content blocks=${response.content.length}`);
+
   // Collect text
   for (const block of response.content) {
     if (block.type === "text") {
       collectedText.push(block.text);
+      console.log(`[voice-agent] Text block: "${block.text}"`);
+    } else if (block.type === "tool_use") {
+      console.log(`[voice-agent] Tool use block: ${block.name}(${JSON.stringify(block.input).slice(0, 100)})`);
     }
   }
 
@@ -146,11 +155,12 @@ export async function processVoiceUtterance(
 
     for (const block of response.content) {
       if (block.type === "tool_use") {
-        console.log(`[voice-agent] Tool: ${block.name}`);
+        console.log(`[voice-agent] Executing tool: ${block.name}`);
         const result = handleMemoryTool(
           block.name,
           block.input as Record<string, unknown>,
         );
+        console.log(`[voice-agent] Tool result (${block.name}): ${result.slice(0, 200)}`);
         toolResults.push({
           type: "tool_result",
           tool_use_id: block.id,
@@ -162,6 +172,7 @@ export async function processVoiceUtterance(
     messages.push({ role: "user", content: toolResults });
 
     // Second call to get the actual response
+    console.log(`[voice-agent] Follow-up Claude call after tool use...`);
     const followUp = await client.messages.create({
       model: getVoiceModel(),
       max_tokens: VOICE_MAX_TOKENS,
@@ -169,9 +180,12 @@ export async function processVoiceUtterance(
       messages,
     });
 
+    console.log(`[voice-agent] Follow-up response: stop_reason=${followUp.stop_reason}, blocks=${followUp.content.length}`);
+
     for (const block of followUp.content) {
       if (block.type === "text") {
         collectedText.push(block.text);
+        console.log(`[voice-agent] Follow-up text: "${block.text}"`);
       }
     }
   }
@@ -179,7 +193,7 @@ export async function processVoiceUtterance(
   const responseText = collectedText.join(" ").trim();
   const elapsed = Date.now() - startTime;
 
-  console.log(`[voice-agent] Response in ${elapsed}ms: "${responseText.slice(0, 100)}"`);
+  console.log(`[voice-agent] ✅ Response in ${elapsed}ms: "${responseText}"`);
 
   // Update history
   voiceHistory.push({ role: "user", content: text });

@@ -109,8 +109,20 @@ export function subscribeToUser(
     },
   });
 
+  let packetCount = 0;
+  let decodeErrors = 0;
+
   const handleData = (packet: Buffer) => {
     try {
+      packetCount++;
+
+      // Log first packet and every 250th (~5 seconds of audio)
+      if (packetCount === 1) {
+        console.log(`[voice:recv] First opus packet from ${userId}: ${packet.length} bytes`);
+      } else if (packetCount % 250 === 0) {
+        console.log(`[voice:recv] Opus packets from ${userId}: ${packetCount} received, ${decodeErrors} decode errors`);
+      }
+
       // Decode opus to PCM
       const pcm48k = decodeOpus(packet);
       // Pass raw PCM for buffering
@@ -119,13 +131,25 @@ export function subscribeToUser(
       const frame16k = downsampleToMono16k(pcm48k);
       onFrame(frame16k);
     } catch (err) {
-      // Decoding errors are common during silence transitions
+      decodeErrors++;
+      if (decodeErrors <= 3) {
+        console.log(`[voice:recv] Opus decode error #${decodeErrors} for ${userId}: ${err}`);
+      }
     }
   };
 
   opusStream.on("data", handleData);
 
+  opusStream.on("close", () => {
+    console.log(`[voice:recv] Opus stream closed for ${userId} (total packets: ${packetCount}, errors: ${decodeErrors})`);
+  });
+
+  opusStream.on("end", () => {
+    console.log(`[voice:recv] Opus stream ended for ${userId} (total packets: ${packetCount})`);
+  });
+
   const destroy = () => {
+    console.log(`[voice:recv] Destroying audio stream for ${userId} (total packets: ${packetCount})`);
     opusStream.removeListener("data", handleData);
     opusStream.destroy();
   };

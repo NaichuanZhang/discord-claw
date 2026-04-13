@@ -36,6 +36,18 @@ const IDLE_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes
 const SAMPLES_PER_MS = 16;
 
 // ---------------------------------------------------------------------------
+// Debug logging
+// ---------------------------------------------------------------------------
+
+const VOICE_DEBUG = process.env.VOICE_DEBUG !== "0"; // On by default, set VOICE_DEBUG=0 to disable
+
+function dbg(stage: string, msg: string): void {
+  if (VOICE_DEBUG) {
+    console.log(`[voice:${stage}] ${msg}`);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // State
 // ---------------------------------------------------------------------------
 
@@ -63,6 +75,12 @@ interface UserUtteranceState {
   silenceTimer: ReturnType<typeof setTimeout> | null;
   /** Timestamp when speech started */
   speechStartTime: number;
+  /** Count of VAD frames processed (for periodic logging) */
+  vadFrameCount: number;
+  /** Count of speech frames detected */
+  vadSpeechFrames: number;
+  /** Count of audio data callbacks received */
+  audioCallbackCount: number;
 }
 
 const userStates = new Map<string, UserUtteranceState>();
@@ -78,6 +96,7 @@ export async function initVoice(): Promise<void> {
   vad = new SileroVAD();
   await vad.init();
   console.log("[voice] Voice assistant initialized");
+  console.log(`[voice] Config: SILENCE_DURATION=${SILENCE_DURATION_MS}ms, MIN_UTTERANCE=${MIN_UTTERANCE_MS}ms, DEBUG=${VOICE_DEBUG}`);
 }
 
 /**
@@ -103,12 +122,16 @@ export async function startVoice(channel: VoiceBasedChannel): Promise<void> {
 
   // Set up the audio player on this connection
   connection.subscribe(audioPlayer);
+  dbg("init", "Audio player subscribed to connection");
 
   // Listen for users speaking
   const receiver = connection.receiver;
 
   receiver.speaking.on("start", (userId: string) => {
-    if (userStreams.has(userId)) return; // Already subscribed
+    if (userStreams.has(userId)) {
+      dbg("event", `User ${userId} speaking:start but already subscribed, skipping`);
+      return;
+    }
 
     console.log(`[voice] User ${userId} started speaking`);
     resetIdleTimer();
@@ -123,10 +146,14 @@ export async function startVoice(channel: VoiceBasedChannel): Promise<void> {
       lastSpeechTime: 0,
       silenceTimer: null,
       speechStartTime: 0,
+      vadFrameCount: 0,
+      vadSpeechFrames: 0,
+      audioCallbackCount: 0,
     };
     userStates.set(userId, state);
 
     // Subscribe to their audio
+    dbg("recv", `Subscribing to audio stream for user ${userId}`);
     const stream = subscribeToUser(
       connection,
       userId,
@@ -137,12 +164,17 @@ export async function startVoice(channel: VoiceBasedChannel): Promise<void> {
     );
 
     userStreams.set(userId, stream);
+    dbg("recv", `Audio stream subscribed for user ${userId}`);
   });
 
   receiver.speaking.on("end", (userId: string) => {
     // Don't immediately clean up — wait for silence timer to fire
     // This handles brief pauses in speech
-    console.log(`[voice] User ${userId} stopped speaking (Discord event)`);
+    const state = userStates.get(userId);
+    const info = state
+      ? `vadFrames=${state.vadFrameCount}, speechFrames=${state.vadSpeechFrames}, audioCallbacks=${state.audioCallbackCount}, isSpeaking=${state.isSpeaking}`
+      : "no state";
+    console.log(`[voice] User ${userId} stopped speaking (Discord event) [${info}]`);
   });
 
   resetIdleTimer();
@@ -191,6 +223,15 @@ function handleRawPcm(userId: string, pcm: Int16Array): void {
   const state = userStates.get(userId);
   if (!state) return;
 
+  state.audioCallbackCount++;
+
+  // Log first callback and then every 100th
+  if (state.audioCallbackCount === 1) {
+    dbg("pcm", `First raw PCM callback for ${userId}: ${pcm.length} samples`);
+  } else if (state.audioCallbackCount % 100 === 0) {
+    dbg("pcm", `Raw PCM callback #${state.audioCallbackCount} for ${userId}, isSpeaking=${state.isSpeaking}, buffered chunks=${state.rawChunks.length}`);
+  }
+
   if (state.isSpeaking) {
     state.rawChunks.push(new Int16Array(pcm)); // Copy
     state.totalRawSamples += pcm.length;
@@ -202,7 +243,11 @@ function handleRawPcm(userId: string, pcm: Int16Array): void {
  */
 async function handleVadFrame(userId: string, frame: Float32Array): Promise<void> {
   const state = userStates.get(userId);
-  if (!state || !vad) return;
+  if (!state || !vad) {
+    if (!state) dbg("vad", `No state for user ${userId}`);
+    if (!vad) dbg("vad", "VAD not initialized!");
+    return;
+  }
 
   // Accumulate samples into the VAD frame buffer
   let offset = 0;
@@ -216,7 +261,18 @@ async function handleVadFrame(userId: string, frame: Float32Array): Promise<void
     // When we have a full frame, process it
     if (state.vadFrameOffset >= FRAME_SIZE) {
       try {
-        const isSpeech = await vad.isSpeech(state.vadFrameBuffer);
+        const prob = await vad.process(state.vadFrameBuffer);
+        const isSpeech = prob > 0.5;
+        state.vadFrameCount++;
+
+        if (isSpeech) {
+          state.vadSpeechFrames++;
+        }
+
+        // Log VAD probability periodically (every 10 frames = ~300ms)
+        if (state.vadFrameCount % 10 === 0) {
+          dbg("vad", `user=${userId} frame#${state.vadFrameCount} prob=${prob.toFixed(3)} isSpeech=${isSpeech} speaking=${state.isSpeaking} speechFrames=${state.vadSpeechFrames}`);
+        }
 
         if (isSpeech) {
           if (!state.isSpeaking) {
@@ -225,11 +281,11 @@ async function handleVadFrame(userId: string, frame: Float32Array): Promise<void
             state.speechStartTime = Date.now();
             state.rawChunks = [];
             state.totalRawSamples = 0;
-            console.log(`[voice] Speech detected from ${userId}`);
+            console.log(`[voice] 🎤 Speech STARTED from ${userId} (prob=${prob.toFixed(3)})`);
 
             // If bot is speaking, interrupt it
             if (audioPlayer.state.status === AudioPlayerStatus.Playing) {
-              console.log("[voice] Interrupting bot playback");
+              console.log("[voice] ⚡ Interrupting bot playback");
               audioPlayer.stop();
             }
           }
@@ -244,13 +300,14 @@ async function handleVadFrame(userId: string, frame: Float32Array): Promise<void
         } else if (state.isSpeaking) {
           // In speech but VAD says silence — start silence timer
           if (!state.silenceTimer) {
+            dbg("vad", `Silence detected for ${userId}, starting ${SILENCE_DURATION_MS}ms timer (prob=${prob.toFixed(3)})`);
             state.silenceTimer = setTimeout(() => {
               onUtteranceComplete(userId);
             }, SILENCE_DURATION_MS);
           }
         }
       } catch (err) {
-        // VAD processing error — skip this frame
+        dbg("vad", `VAD processing error for ${userId}: ${err}`);
       }
 
       // Reset frame buffer
@@ -266,6 +323,9 @@ async function onUtteranceComplete(userId: string): Promise<void> {
   const state = userStates.get(userId);
   if (!state || !state.isSpeaking) return;
 
+  const utteranceDuration = Date.now() - state.speechStartTime;
+  console.log(`[voice] 🔇 Speech ENDED from ${userId} (duration=${utteranceDuration}ms, chunks=${state.rawChunks.length}, vadFrames=${state.vadFrameCount}, speechFrames=${state.vadSpeechFrames})`);
+
   // Mark as no longer speaking
   state.isSpeaking = false;
   if (state.silenceTimer) {
@@ -274,9 +334,8 @@ async function onUtteranceComplete(userId: string): Promise<void> {
   }
 
   // Check minimum utterance length
-  const utteranceDuration = Date.now() - state.speechStartTime;
   if (utteranceDuration < MIN_UTTERANCE_MS) {
-    console.log(`[voice] Utterance too short (${utteranceDuration}ms), discarding`);
+    console.log(`[voice] ⏭️ Utterance too short (${utteranceDuration}ms < ${MIN_UTTERANCE_MS}ms), discarding`);
     state.rawChunks = [];
     state.totalRawSamples = 0;
     return;
@@ -284,7 +343,7 @@ async function onUtteranceComplete(userId: string): Promise<void> {
 
   // If already processing another utterance, skip (queue could be added later)
   if (processing) {
-    console.log("[voice] Already processing, skipping utterance");
+    console.log("[voice] ⏭️ Already processing another utterance, skipping");
     state.rawChunks = [];
     state.totalRawSamples = 0;
     return;
@@ -296,6 +355,7 @@ async function onUtteranceComplete(userId: string): Promise<void> {
   state.totalRawSamples = 0;
 
   if (rawChunks.length === 0) {
+    console.log("[voice] ⏭️ No audio chunks buffered, skipping");
     return;
   }
 
@@ -303,6 +363,7 @@ async function onUtteranceComplete(userId: string): Promise<void> {
   vad?.reset();
 
   processing = true;
+  const pipelineStart = Date.now();
 
   try {
     // 1. Concatenate raw PCM chunks
@@ -318,31 +379,53 @@ async function onUtteranceComplete(userId: string): Promise<void> {
     const mono16k = downsampleToMono16kInt16(rawPcm);
 
     const durationSec = mono16k.length / 16000;
-    console.log(`[voice] Processing utterance: ${durationSec.toFixed(1)}s from user ${userId}`);
+    console.log(`[voice] 📝 Step 1/5: Audio ready — ${durationSec.toFixed(1)}s, ${totalSamples} raw samples → ${mono16k.length} mono16k samples`);
 
     // 3. STT
+    console.log(`[voice] 📝 Step 2/5: Transcribing (STT)...`);
+    const sttStart = Date.now();
     const text = await transcribe(mono16k);
+    const sttElapsed = Date.now() - sttStart;
 
     if (!text || text.trim().length === 0) {
-      console.log("[voice] Empty transcription, skipping");
+      console.log(`[voice] ⏭️ Empty transcription after ${sttElapsed}ms, skipping`);
       return;
     }
 
+    console.log(`[voice] 🗣️ STT result (${sttElapsed}ms): "${text}"`);
+
     // 4. Get user display name
     const userName = await getUserDisplayName(userId);
+    dbg("pipeline", `User display name: ${userName}`);
 
     // 5. Claude voice agent
+    console.log(`[voice] 📝 Step 3/5: Generating response (Claude)...`);
+    const agentStart = Date.now();
     const response = await processVoiceUtterance(text, userName);
+    const agentElapsed = Date.now() - agentStart;
+
+    console.log(`[voice] 🤖 Agent response (${agentElapsed}ms): "${response}"`);
 
     // 6. TTS
+    console.log(`[voice] 📝 Step 4/5: Synthesizing speech (TTS)...`);
+    const ttsStart = Date.now();
     const audioBuffer = await synthesize(response);
+    const ttsElapsed = Date.now() - ttsStart;
+
+    console.log(`[voice] 🔊 TTS result (${ttsElapsed}ms): ${audioBuffer.length} bytes`);
 
     // 7. Play audio
+    console.log(`[voice] 📝 Step 5/5: Playing audio...`);
+    const playStart = Date.now();
     await playAudio(audioBuffer);
+    const playElapsed = Date.now() - playStart;
 
-    console.log(`[voice] Full pipeline complete for: "${text.slice(0, 50)}"`);
+    const totalElapsed = Date.now() - pipelineStart;
+    console.log(`[voice] ✅ Pipeline complete in ${totalElapsed}ms (STT=${sttElapsed}ms, Agent=${agentElapsed}ms, TTS=${ttsElapsed}ms, Play=${playElapsed}ms)`);
+    console.log(`[voice] ✅ "${text}" → "${response}"`);
   } catch (err) {
-    console.error("[voice] Pipeline error:", err);
+    const totalElapsed = Date.now() - pipelineStart;
+    console.error(`[voice] ❌ Pipeline error after ${totalElapsed}ms:`, err);
   } finally {
     processing = false;
   }
@@ -358,21 +441,24 @@ async function onUtteranceComplete(userId: string): Promise<void> {
 async function playAudio(wavBuffer: Buffer): Promise<void> {
   return new Promise<void>((resolve, reject) => {
     try {
+      dbg("play", `Creating audio resource from ${wavBuffer.length} byte buffer`);
       const stream = Readable.from(wavBuffer);
       const resource = createAudioResource(stream, {
         inputType: StreamType.Arbitrary,
       });
 
       audioPlayer.play(resource);
+      dbg("play", `Audio player started, status: ${audioPlayer.state.status}`);
 
       const onIdle = () => {
         audioPlayer.removeListener("error", onError);
+        dbg("play", "Audio playback finished (idle)");
         resolve();
       };
 
       const onError = (err: Error) => {
         audioPlayer.removeListener(AudioPlayerStatus.Idle, onIdle);
-        console.error("[voice] Audio player error:", err);
+        console.error("[voice] ❌ Audio player error:", err);
         reject(err);
       };
 
