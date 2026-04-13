@@ -13,7 +13,7 @@ import { setCommandsSkillService, setCommandsCronService } from "./bot/commands.
 import { startGateway } from "./gateway/server.js";
 import { cleanExpiredSessions } from "./agent/sessions.js";
 import { setRestartHandler } from "./restart.js";
-import { syncDeployedEvolutions, setEvolutionSendToDiscord, checkGhCli } from "./evolution/engine.js";
+import { syncDeployedEvolutions, setEvolutionSendToDiscord, setEvolutionCreateThread, checkGhCli } from "./evolution/engine.js";
 import { setHealthDiscordClient, setServicesReady } from "./evolution/health.js";
 import {
   startReflectionDaemon,
@@ -99,6 +99,23 @@ async function main(): Promise<void> {
       return;
     }
     await channel.send(text);
+  });
+
+  // Wire evolution → Discord thread creation (for deployment notifications)
+  setEvolutionCreateThread(async (channelId, name, message) => {
+    const channel: any = await client.channels.fetch(channelId);
+    if (!channel?.threads) {
+      console.error(`[evolution] Channel ${channelId} does not support threads`);
+      return;
+    }
+    const thread = await channel.threads.create({
+      name: name.slice(0, 100),
+      // ChannelType.PublicThread = 11
+      type: 11,
+    });
+    if (message) {
+      await thread.send(message);
+    }
   });
 
   // Wire reflection daemon → Discord delivery

@@ -27,6 +27,9 @@ const BETA_DIR = join(PROJECT_ROOT, "beta");
 const GIT_TIMEOUT = 30_000;
 const GH_TIMEOUT = 30_000;
 
+// Channel where deployment notifications are posted as threads
+const DEPLOY_NOTIFY_CHANNEL_ID = "1493291137908216080";
+
 // ---------------------------------------------------------------------------
 // Logging
 // ---------------------------------------------------------------------------
@@ -76,16 +79,26 @@ function slugify(text: string): string {
 }
 
 // ---------------------------------------------------------------------------
-// Discord notification callback
+// Discord notification callbacks
 // ---------------------------------------------------------------------------
 
 let _sendToDiscord: ((channelId: string, text: string) => Promise<void>) | null =
   null;
 
+let _createDiscordThread:
+  | ((channelId: string, name: string, message: string) => Promise<void>)
+  | null = null;
+
 export function setEvolutionSendToDiscord(
   fn: (channelId: string, text: string) => Promise<void>,
 ): void {
   _sendToDiscord = fn;
+}
+
+export function setEvolutionCreateThread(
+  fn: (channelId: string, name: string, message: string) => Promise<void>,
+): void {
+  _createDiscordThread = fn;
 }
 
 // ---------------------------------------------------------------------------
@@ -345,6 +358,38 @@ export async function mergeEvolution(opts: {
       );
     } catch (err) {
       log("Failed to send Discord notification:", err);
+    }
+  }
+
+  // Post deployment notification as a thread in the deploy channel
+  if (_createDiscordThread) {
+    try {
+      const summary = evolution.changesSummary || `PR #${evolution.prNumber}`;
+      const threadName = summary.slice(0, 100);
+      const filesChanged = evolution.filesChanged ?? [];
+      const threadBody = [
+        `✅ **Deployed** — PR #${evolution.prNumber}`,
+        "",
+        `**Summary:** ${summary}`,
+        `**Triggered by:** <@${evolution.triggeredBy}>`,
+        `**Files changed:** ${filesChanged.length}`,
+        ...(filesChanged.length > 0
+          ? ["", ...filesChanged.map((f) => `- \`${f}\``)]
+          : []),
+        "",
+        evolution.prUrl ? `🔗 ${evolution.prUrl}` : "",
+      ]
+        .filter((line) => line !== undefined)
+        .join("\n");
+
+      await _createDiscordThread(
+        DEPLOY_NOTIFY_CHANNEL_ID,
+        threadName,
+        threadBody,
+      );
+      log(`Deployment thread created in ${DEPLOY_NOTIFY_CHANNEL_ID}`);
+    } catch (err) {
+      log("Failed to create deployment notification thread:", err);
     }
   }
 
