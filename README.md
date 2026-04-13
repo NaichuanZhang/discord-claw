@@ -9,13 +9,16 @@ A stripped-down Discord agent powered by Claude. Simplified fork of [openclaw](h
 ## Features
 
 - 💬 **Conversational AI** — @mention in channels or DM directly. Full conversation history per session.
+- 🧵 **Thread-First Replies** — In guild channels, every response goes into its own thread for clean session isolation. Monitored channels auto-respond without @mention.
 - 🎤 **Voice Message Support** — Send voice DMs and the bot transcribes them automatically via OpenAI Whisper.
 - 🧠 **Persistent Memory** — Remembers things across conversations. Markdown files indexed with FTS5 full-text search.
+- 📜 **Conversation History** — Messages are archived across sessions. Query past conversations with `get_conversation_history` and `get_conversation_stats` tools.
 - 🎭 **Customizable Personality** — Edit `SOUL.md` to change how the bot behaves. Hot-reloads on save.
-- 🔧 **Tool Use** — Runs shell commands, reads/writes files, sends messages across channels, reacts to messages, attaches files.
+- 🔧 **Tool Use** — Runs shell commands, reads/writes files, sends messages across channels, reacts to messages, attaches files, creates threads.
 - 📦 **Skills** — Drop a `SKILL.md` folder into `data/skills/` and the bot learns new capabilities instantly. Install from GitHub or upload directly.
-- ⏰ **Scheduled Tasks** — Cron jobs that run agent turns on a schedule and deliver results to channels.
-- 🧬 **Self-Evolution** — The bot can modify its own source code via GitHub PRs. Review diffs and merge from Discord.
+- ⏰ **Scheduled Tasks** — Cron jobs that run agent turns on a schedule, delivering results in daily threads. Hot-reloads `jobs.json` without restart.
+- 🧬 **Self-Evolution** — The bot can modify its own source code via GitHub PRs. Review diffs and merge from Discord. Deployment notifications posted automatically.
+- 🔍 **Autonomous Reflection** — Collects signals (errors, tool failures, duplicate loops) and periodically analyzes them to suggest improvements.
 - 📊 **Web Dashboard** — React SPA for managing sessions, channels, soul, memory, cron, skills, and evolution history.
 - 🔍 **Web Search** — Install the SearXNG skill for web, news, and package repository search.
 
@@ -53,11 +56,14 @@ Bot: [evolve_merge] Merged and restarting... ✅
 
 | Command | Description |
 |---------|-------------|
+| `/ping` | Show bot health status, latency, and uptime |
 | `/help` | Show all commands and capabilities |
 | `/config` | Toggle bot on/off per channel, set custom instructions |
-| `/sessions` | View and manage conversation sessions |
 | `/clear` | Reset conversation history in current session |
-| `/soul` | View or edit the bot's personality |
+| `/soul` | View the bot's personality |
+| `/skills` | List, install (from GitHub), or remove skills |
+| `/cron` | View, add, enable/disable, force-run, or show history of cron jobs |
+| `/restart` | Restart the bot process |
 
 ## Getting Started
 
@@ -89,7 +95,7 @@ cd discord-claw
 2. Create a new application → **Bot** tab → copy token
 3. Enable **Message Content Intent** and **Server Members Intent**
 4. **OAuth2 > URL Generator** → scopes: `bot`, `applications.commands`
-5. Permissions: Send Messages, Read Message History, Add Reactions, Attach Files, Use Slash Commands
+5. Permissions: Send Messages, Read Message History, Add Reactions, Attach Files, Use Slash Commands, Create Public Threads
 6. Invite bot to your server with the generated URL
 
 ### 3. Configure Environment
@@ -146,7 +152,7 @@ Without this, the bot can still function normally — it just won't be able to c
 ### 7. Make It Yours
 
 - **Personality** — Edit `data/SOUL.md` to define how your bot talks and behaves. Hot-reloads on save.
-- **Skills** — Drop skill folders into `data/skills/` or install from GitHub via the dashboard.
+- **Skills** — Drop skill folders into `data/skills/` or install from GitHub via the dashboard or `/skills add-github`.
 - **Memory** — The bot builds memory over time. You can also seed `data/MEMORY.md` with initial context.
 
 ### Staying Up to Date
@@ -170,8 +176,14 @@ git merge upstream/main
 | `ANTHROPIC_MODEL` | No | Model name (default: `bedrock-claude-opus-4-6-1m`) |
 | `OPENAI_API_KEY` | No | OpenAI API key for voice message transcription (Whisper) |
 | `GATEWAY_PORT` | No | Dashboard port (default: `3000`) |
+| `GATEWAY_TOKEN` | No | Auth token for dashboard API access |
 | `SESSION_TTL_HOURS` | No | Session expiry (default: `24`) |
+| `LOG_LEVEL` | No | Logging level |
 | `DISCORD_WEBHOOK_URL` | No | Webhook for `start.sh` notifications (deploy, rollback alerts) |
+| `REFLECTION_CHANNEL_ID` | No | Discord channel for reflection daemon proposals |
+| `REFLECTION_INTERVAL_HOURS` | No | How often the reflection daemon runs (default: `6`) |
+| `REFLECTION_LOOKBACK_HOURS` | No | Signal lookback window (default: `24`) |
+| `REFLECTION_MIN_SIGNALS` | No | Minimum signals before reflection triggers |
 
 *Either `ANTHROPIC_API_KEY` or `ANTHROPIC_BASE_URL` + `ANTHROPIC_AUTH_TOKEN` required.
 
@@ -181,15 +193,17 @@ git merge upstream/main
 
 **Memory** — Markdown files in `data/` indexed with SQLite FTS5. The agent searches memory before answering questions about past context. BM25 ranked results. Queries are sanitized for FTS5 compatibility (special characters like hyphens and colons are handled automatically).
 
-**Sessions** — Per-thread/DM/channel conversation tracking. History loaded as context for each message. Auto-expires after TTL.
+**Sessions** — Per-thread/DM/channel conversation tracking. History loaded as context for each message. Auto-expires after TTL. Messages are archived to enable cross-session querying via `get_conversation_history` and `get_conversation_stats` tools.
 
-**Cron** — Scheduled tasks with three schedule types: one-shot (`at`), interval (`every`), cron expression (`cron`). Jobs can run agent turns and deliver results to Discord channels. Auto-disables after 3 consecutive failures. Hot-reloads jobs.json on each tick cycle (up to every 60s) so externally-added jobs are picked up without a restart.
+**Cron** — Scheduled tasks with three schedule types: one-shot (`at`), interval (`every`), cron expression (`cron`). `agentTurn` jobs run the agent and deliver results inside daily threads (the agent handles all delivery via tools — no duplicate top-level messages). `systemEvent` jobs deliver results directly to the configured channel. Auto-disables after 3 consecutive failures. Hot-reloads `jobs.json` on each tick cycle (up to every 60s) so externally-added jobs are picked up without a restart.
 
-**Skills** — Modular capabilities defined as SKILL.md files with YAML frontmatter. Install from GitHub URL or upload directly. Uses SDK progressive loading pattern: only skill metadata (name, description, path) is injected into the system prompt; the agent reads full skill content on demand via `read_skill` tool. Skills can include companion files (scripts, references). Manageable via dashboard.
+**Skills** — Modular capabilities defined as SKILL.md files with YAML frontmatter. Install from GitHub URL or upload directly. Uses SDK progressive loading pattern: only skill metadata (name, description, path) is injected into the system prompt; the agent reads full skill content on demand via `read_skill` tool. Skills can include companion files (scripts, references). Manageable via dashboard and `/skills` command.
 
-**Dashboard** — Single-page React app at `http://localhost:3000`. Status, session browser, channel config, soul/memory editor, cron manager, skills manager, evolution history, real-time message logs via WebSocket.
+**Dashboard** — Single-page React app at `http://localhost:3000`. Pages: Status, Sessions, Channels, Config, Cron, Skills, Evolution, Logs. Real-time message streaming via WebSocket.
 
 **Agent Loop** — The tool-use loop runs until the model produces a final text response. To prevent infinite loops, consecutive duplicate tool calls (same tool + same arguments) are detected — after 2 identical rounds the agent is forced to produce a final response. Typing indicator refreshes every 8 seconds to stay visible during long tool chains.
+
+**Thread-First Replies** — In guild text channels, every bot response creates a thread on the user's message. Bot-created threads don't require @mentions for follow-up. Monitored channels auto-respond to all messages without @mention. DMs bypass threading entirely.
 
 **File Attachments** — The agent can send files (PDFs, images, HTML, etc.) to Discord channels via the `send_file` tool. Files up to 25 MB are supported (Discord bot default tier).
 
@@ -197,9 +211,13 @@ git merge upstream/main
 
 **Voice Messages** — Discord voice DMs and audio attachments are automatically detected and transcribed using OpenAI's Whisper API. The transcribed text is passed to the agent as the message content. Requires `OPENAI_API_KEY`. Gracefully degrades with a helpful message if the API key isn't configured. Supports OGG, MP3, WAV, M4A, WebM, FLAC, and other common audio formats.
 
-**Evolution Engine** — The bot can modify its own source code through GitHub pull requests. All changes are isolated in a git worktree at `beta/`, typechecked, and submitted as PRs via `gh` CLI. The agent has 9 evolution tools: `evolve_start`, `evolve_read`, `evolve_write`, `evolve_bash`, `evolve_propose`, `evolve_suggest`, `evolve_cancel`, `evolve_review`, and `evolve_merge`. Users can review PR diffs and merge directly from Discord — merging automatically triggers a restart to deploy the changes. The bot also records ideas for improvements it can't yet make (`evolve_suggest`). Evolution history is tracked in SQLite and viewable in the dashboard. An idempotent startup script (`start.sh`) handles deploy: `git pull` → run migrations → build → start → health check → auto-rollback on failure.
+**Evolution Engine** — The bot can modify its own source code through GitHub pull requests. All changes are isolated in a git worktree at `beta/`, typechecked, and submitted as PRs via `gh` CLI. The agent has 9 evolution tools: `evolve_start`, `evolve_read`, `evolve_write`, `evolve_bash`, `evolve_propose`, `evolve_suggest`, `evolve_cancel`, `evolve_review`, and `evolve_merge`. Users can review PR diffs and merge directly from Discord — merging automatically triggers a restart to deploy the changes and posts a deployment notification thread to a configured channel. The bot also records ideas for improvements it can't yet make (`evolve_suggest`). Evolution history is tracked in SQLite and viewable in the dashboard.
 
-**Restart** — The bot can restart itself via slash command or automatically after merging an evolution PR. On restart, stale instances are automatically detected and killed to prevent duplicate bots.
+**Reflection System** — Autonomous self-improvement discovery. Two components:
+- **Signal collection** (`reflection/signals.ts`): Passively records events — errors, tool failures, duplicate loop patterns. Never throws, ensuring it can't crash the main pipeline. Auto-prunes signals older than 7 days.
+- **Reflection daemon** (`reflection/daemon.ts`): Runs on a configurable interval (default: every 6 hours). Gathers signals, builds a structured analysis prompt, calls Claude, and if an improvement is found, records it as an evolution idea and posts a proposal to a Discord channel. Level 1 trust: never auto-implements — always requires human approval.
+
+**Restart** — The bot can restart itself via `/restart` command or automatically after merging an evolution PR. On restart, stale instances are automatically detected and killed to prevent duplicate bots. An idempotent startup script (`start.sh`) handles deploy: `git pull` → run migrations → build → start → health check → auto-rollback on failure.
 
 ## Architecture
 
@@ -230,6 +248,7 @@ graph TB
             CRON[Cron Service]
             EVO[Evolution Engine<br/>Self-Modification]
             VOICE[Voice Transcription<br/>Whisper API]
+            REFL[Reflection Daemon<br/>Signal Analysis]
         end
 
         subgraph Storage
@@ -275,6 +294,9 @@ graph TB
     CRON -->|agent turns| PM
     CRON -->|deliver| CL
     CRON --> FS
+    REFL -->|collect signals| DB
+    REFL -->|analyze| CLAUDE
+    REFL -->|propose ideas| EVO
     API --> DB
     API --> SESS
     API --> SOUL
@@ -300,7 +322,7 @@ sequenceDiagram
     participant DB as SQLite
 
     U->>B: @mention, DM, or voice message
-    B->>B: Filter (bot? mention? enabled?)
+    B->>B: Filter (bot? mention? monitored? bot thread?)
 
     opt Voice Message Detected
         B->>V: transcribeAudio(attachment URL)
@@ -330,9 +352,9 @@ sequenceDiagram
     A-->>B: AgentResponse (text + images)
 
     B->>B: Stop typing indicator
-    B->>DB: log user message
-    B->>DB: log assistant response
-    B->>U: message.reply(response)
+    B->>DB: log + archive user message
+    B->>DB: log + archive assistant response
+    B->>U: Create thread → reply inside
     B->>WS: broadcastLog(entry)
 ```
 
@@ -353,14 +375,13 @@ sequenceDiagram
     alt agentTurn payload
         CS->>A: processAgentTurn(message)
         A->>C: messages.create(soul + message)
-        C-->>A: response
-        A-->>CS: result text
+        C-->>A: response (agent creates thread + posts via tools)
+        A-->>CS: result text (delivery handled by agent)
     else systemEvent payload
         CS->>CS: log event text
-    end
-
-    opt delivery configured
-        CS->>D: channel.send(result)
+        opt delivery configured
+            CS->>D: channel.send(result)
+        end
     end
 
     CS->>ST: updateJobState(lastRun, status)
@@ -410,7 +431,7 @@ sequenceDiagram
     participant E as Evolution Engine
     participant W as beta/ Worktree
     participant GH as GitHub
-    participant O as Owner
+    participant DC as Deploy Channel
 
     U->>A: "Add feature X"
     A->>E: evolve_start(reason)
@@ -442,6 +463,7 @@ sequenceDiagram
     U->>A: "Merge it"
     A->>E: evolve_merge(id)
     E->>GH: gh pr merge --squash
+    E->>DC: Create deployment thread
     E->>E: triggerRestart()
     E->>E: start.sh: git pull → migrate → build → start
     E->>E: Health check ✓ (or auto-rollback)
@@ -456,14 +478,14 @@ discordclaw/
 │   ├── restart.ts            # Shared restart trigger — avoids circular deps
 │   ├── bot/                   # Discord bot (discord.js v14)
 │   │   ├── client.ts          # Client setup, intents, event routing, DM raw fallback
-│   │   ├── messages.ts        # Message pipeline: filter → session → voice transcribe → agent → reply
-│   │   ├── commands.ts        # Slash commands: /help /config /sessions /clear /soul
+│   │   ├── messages.ts        # Message pipeline: filter → session → voice transcribe → agent → thread reply
+│   │   ├── commands.ts        # Slash commands: /ping /help /config /clear /soul /skills /cron /restart
 │   │   └── components.ts      # Button/select interaction handler
 │   ├── agent/                 # Claude integration
 │   │   ├── agent.ts           # Anthropic SDK wrapper, system prompt, tool loop + duplicate detection
-│   │   ├── tools.ts           # Discord tools (send_message, send_file, add_reaction, get_history, create_thread)
+│   │   ├── tools.ts           # Discord tools (send_message, send_file, add_reaction, get_channel_history, create_thread)
 │   │   ├── dangerous-tools.ts # Powerful tools: bash, read_file, write_file
-│   │   └── sessions.ts        # Per-thread/DM session tracking + TTL
+│   │   └── sessions.ts        # Per-thread/DM session tracking + TTL + message archiving
 │   ├── audio/                 # Voice message handling
 │   │   └── transcribe.ts      # Download + transcribe via OpenAI Whisper API
 │   ├── skills/                # Skills management (SDK pattern)
@@ -478,10 +500,13 @@ discordclaw/
 │   │   └── tools.ts           # memory_search + memory_get tool definitions
 │   ├── cron/
 │   │   ├── types.ts           # Job, schedule, payload, delivery types
-│   │   ├── store.ts           # JSON persistence + JSONL run history
-│   │   └── service.ts         # Timer loop, execution, retry, auto-disable
+│   │   ├── store.ts           # JSON persistence + JSONL run history + hot-reload
+│   │   └── service.ts         # Timer loop, execution, retry, auto-disable, thread-only delivery for agentTurn
+│   ├── reflection/            # Autonomous self-improvement
+│   │   ├── signals.ts         # Passive signal collection (errors, tool failures, duplicate loops)
+│   │   └── daemon.ts          # Periodic analysis, idea generation, channel proposals
 │   ├── evolution/             # Self-evolution system
-│   │   ├── engine.ts          # Git worktree lifecycle, PR creation via gh CLI
+│   │   ├── engine.ts          # Git worktree lifecycle, PR creation via gh CLI, deployment notifications
 │   │   ├── log.ts             # Evolution SQLite table + CRUD
 │   │   ├── tools.ts           # Agent tools: evolve_start/read/write/bash/propose/suggest/cancel/review/merge
 │   │   └── health.ts          # /api/health endpoint for start.sh
@@ -498,7 +523,7 @@ discordclaw/
 │   ├── SOUL.md                # Bot personality
 │   ├── MEMORY.md              # Long-term memory
 │   ├── memory/                # Daily memory notes
-│   ├── cron/                  # Job store + run history
+│   ├── cron/                  # Job store + run history (jobs.json gitignored, seed file tracked)
 │   ├── skills/                # Installed skills (SKILL.md + companion files)
 │   └── .migrations/           # Marker files for completed migrations
 ├── migrations/                # Idempotent migration scripts (run by start.sh)
