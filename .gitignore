@@ -13,3 +13,4 @@ reference/
 .claude-design/
 beta/
 data/.migrations/
+data/models/

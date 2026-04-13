@@ -28,6 +28,7 @@ export function createClient(): Client {
       GatewayIntentBits.MessageContent,
       GatewayIntentBits.DirectMessages,
       GatewayIntentBits.GuildMessageReactions,
+      GatewayIntentBits.GuildVoiceStates, // Voice support
     ],
     partials: [Partials.Channel, Partials.Message, Partials.User],
   });

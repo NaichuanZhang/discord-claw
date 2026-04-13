@@ -11,6 +11,7 @@ A stripped-down Discord agent powered by Claude. Simplified fork of [openclaw](h
 - 💬 **Conversational AI** — @mention in channels or DM directly. Full conversation history per session.
 - 🧵 **Thread-First Replies** — In guild channels, every response goes into its own thread for clean session isolation. Monitored channels auto-respond without @mention.
 - 🎤 **Voice Message Support** — Send voice DMs and the bot transcribes them automatically via OpenAI Whisper.
+- 🎙️ **Voice Assistant** — Join voice channels with `/join`. Listens via Silero VAD, transcribes with EigenAI Whisper, thinks with Claude Sonnet, speaks back with EigenAI Chatterbox TTS. Supports interruptions and auto-disconnect.
 - 🧠 **Persistent Memory** — Remembers things across conversations. Markdown files indexed with FTS5 full-text search.
 - 📜 **Conversation History** — Messages are archived across sessions. Query past conversations with `get_conversation_history` and `get_conversation_stats` tools.
 - 🎭 **Customizable Personality** — Edit `SOUL.md` to change how the bot behaves. Hot-reloads on save.
@@ -64,6 +65,8 @@ Bot: [evolve_merge] Merged and restarting... ✅
 | `/skills` | List, install (from GitHub), or remove skills |
 | `/cron` | View, add, enable/disable, force-run, or show history of cron jobs |
 | `/restart` | Restart the bot process |
+| `/join` | Join your voice channel as a voice assistant |
+| `/leave` | Leave the voice channel |
 
 ## Getting Started
 
@@ -184,6 +187,11 @@ git merge upstream/main
 | `REFLECTION_INTERVAL_HOURS` | No | How often the reflection daemon runs (default: `6`) |
 | `REFLECTION_LOOKBACK_HOURS` | No | Signal lookback window (default: `24`) |
 | `REFLECTION_MIN_SIGNALS` | No | Minimum signals before reflection triggers |
+| `EIGENAI_API_KEY` | No | EigenAI API key for voice STT (Whisper) and TTS (Chatterbox) |
+| `VOICE_MODEL` | No | Claude model for voice responses (default: `claude-sonnet-4-20250514`) |
+| `VOICE_MAX_TOKENS` | No | Max tokens for voice responses (default: `512`) |
+| `VOICE_SILENCE_MS` | No | Silence duration to end utterance (default: `1500`) |
+| `VOICE_MIN_UTTERANCE_MS` | No | Minimum utterance length, skip noise (default: `500`) |
 
 *Either `ANTHROPIC_API_KEY` or `ANTHROPIC_BASE_URL` + `ANTHROPIC_AUTH_TOKEN` required.
 
@@ -210,6 +218,8 @@ git merge upstream/main
 **Image Support** — When the agent's response contains markdown images (`![alt](url)`), they are automatically extracted and rendered as Discord embeds (for web URLs) or file attachments (for local files). Image markdown is stripped from the text to avoid showing raw URLs.
 
 **Voice Messages** — Discord voice DMs and audio attachments are automatically detected and transcribed using OpenAI's Whisper API. The transcribed text is passed to the agent as the message content. Requires `OPENAI_API_KEY`. Gracefully degrades with a helpful message if the API key isn't configured. Supports OGG, MP3, WAV, M4A, WebM, FLAC, and other common audio formats.
+
+**Voice Assistant** — Real-time voice interaction in Discord voice channels. Pipeline: user speaks → opus decode → downsample to 16kHz mono → Silero VAD (ONNX, ~2MB model) detects speech boundaries → EigenAI Whisper V3 Turbo transcribes → Claude Sonnet generates concise spoken response (1-3 sentences, no markdown) → EigenAI Chatterbox TTS synthesizes audio → bot speaks back. Supports interruptions (cuts off bot when user starts speaking), minimum utterance filtering (skips coughs/noise), and auto-disconnect after 10 minutes idle. Requires `EIGENAI_API_KEY`.
 
 **Evolution Engine** — The bot can modify its own source code through GitHub pull requests. All changes are isolated in a git worktree at `beta/`, typechecked, and submitted as PRs via `gh` CLI. The agent has 9 evolution tools: `evolve_start`, `evolve_read`, `evolve_write`, `evolve_bash`, `evolve_propose`, `evolve_suggest`, `evolve_cancel`, `evolve_review`, and `evolve_merge`. Users can review PR diffs and merge directly from Discord — merging automatically triggers a restart to deploy the changes and posts a deployment notification thread to a configured channel. The bot also records ideas for improvements it can't yet make (`evolve_suggest`). Evolution history is tracked in SQLite and viewable in the dashboard.
 
@@ -488,6 +498,14 @@ discordclaw/
 │   │   └── sessions.ts        # Per-thread/DM session tracking + TTL + message archiving
 │   ├── audio/                 # Voice message handling
 │   │   └── transcribe.ts      # Download + transcribe via OpenAI Whisper API
+│   ├── voice/                 # Voice assistant (real-time voice channel)
+│   │   ├── connection.ts      # Join/leave voice channels, VoiceConnection lifecycle
+│   │   ├── receiver.ts        # Opus decode, downsample 48kHz stereo → 16kHz mono
+│   │   ├── vad.ts             # Silero VAD wrapper (ONNX runtime)
+│   │   ├── stt.ts             # EigenAI Whisper V3 Turbo STT client
+│   │   ├── tts.ts             # EigenAI Chatterbox TTS client
+│   │   ├── agent.ts           # Voice-optimized Claude (Sonnet, 512 tokens, spoken style)
+│   │   └── index.ts           # Orchestrator: wires receive → VAD → STT → agent → TTS → play
 │   ├── skills/                # Skills management (SDK pattern)
 │   │   ├── types.ts           # Skill, SkillMeta, SkillSource types
 │   │   ├── store.ts           # Filesystem-based discovery + per-skill .meta.json
@@ -525,6 +543,7 @@ discordclaw/
 │   ├── memory/                # Daily memory notes
 │   ├── cron/                  # Job store + run history (jobs.json gitignored, seed file tracked)
 │   ├── skills/                # Installed skills (SKILL.md + companion files)
+│   ├── models/                # ML models (Silero VAD ONNX, gitignored)
 │   └── .migrations/           # Marker files for completed migrations
 ├── migrations/                # Idempotent migration scripts (run by start.sh)
 ├── start.sh                   # Production startup: pull → migrate → build → start → health check

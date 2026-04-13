@@ -3,12 +3,14 @@ import {
   type ApplicationCommandData,
   ApplicationCommandOptionType,
   EmbedBuilder,
+  ChannelType,
 } from "discord.js";
 import { clearSession, resolveSession } from "../agent/sessions.js";
 import { getChannelConfig, setChannelConfig, getDb } from "../db/index.js";
 import { getSoul } from "../soul/soul.js";
 import { triggerRestart } from "../restart.js";
 import { handleComponentInteraction } from "./components.js";
+import { startVoice, stopVoice, isConnected } from "../voice/index.js";
 import type { SkillService } from "../skills/service.js";
 import type { CronService } from "../cron/service.js";
 import type { CronJob, CronSchedule, CronPayload, CronDelivery } from "../cron/types.js";
@@ -87,6 +89,14 @@ export const slashCommands: ApplicationCommandData[] = [
   {
     name: "restart",
     description: "Restart the bot process",
+  },
+  {
+    name: "join",
+    description: "Join a voice channel to act as a voice assistant",
+  },
+  {
+    name: "leave",
+    description: "Leave the current voice channel",
   },
   {
     name: "skills",
@@ -323,6 +333,12 @@ export async function handleInteraction(interaction: Interaction): Promise<void>
       case "cron":
         await handleCron(interaction);
         break;
+      case "join":
+        await handleJoin(interaction);
+        break;
+      case "leave":
+        await handleLeave(interaction);
+        break;
       case "restart":
         await interaction.reply({ content: "Restarting...", ephemeral: true });
         triggerRestart();
@@ -342,6 +358,80 @@ export async function handleInteraction(interaction: Interaction): Promise<void>
       await interaction.reply({ content, ephemeral: true });
     }
   }
+}
+
+// ---------------------------------------------------------------------------
+// /join
+// ---------------------------------------------------------------------------
+
+async function handleJoin(
+  interaction: import("discord.js").ChatInputCommandInteraction,
+): Promise<void> {
+  // Must be in a guild
+  if (!interaction.guild) {
+    await interaction.reply({
+      content: "This command can only be used in a server.",
+      ephemeral: true,
+    });
+    return;
+  }
+
+  // Check if already connected
+  if (isConnected()) {
+    await interaction.reply({
+      content: "I'm already in a voice channel. Use `/leave` first.",
+      ephemeral: true,
+    });
+    return;
+  }
+
+  // Find the user's voice channel
+  const member = await interaction.guild.members.fetch(interaction.user.id);
+  const voiceChannel = member.voice.channel;
+
+  if (!voiceChannel) {
+    await interaction.reply({
+      content: "You need to be in a voice channel first!",
+      ephemeral: true,
+    });
+    return;
+  }
+
+  await interaction.deferReply({ ephemeral: true });
+
+  try {
+    await startVoice(voiceChannel);
+    await interaction.editReply({
+      content: `🎙️ Joined **${voiceChannel.name}**! I'm listening.`,
+    });
+  } catch (err) {
+    await interaction.editReply({
+      content: `Failed to join voice channel: ${err instanceof Error ? err.message : String(err)}`,
+    });
+  }
+}
+
+// ---------------------------------------------------------------------------
+// /leave
+// ---------------------------------------------------------------------------
+
+async function handleLeave(
+  interaction: import("discord.js").ChatInputCommandInteraction,
+): Promise<void> {
+  if (!isConnected()) {
+    await interaction.reply({
+      content: "I'm not in a voice channel.",
+      ephemeral: true,
+    });
+    return;
+  }
+
+  stopVoice();
+
+  await interaction.reply({
+    content: "👋 Left the voice channel.",
+    ephemeral: true,
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -449,6 +539,8 @@ async function handleHelp(
           "`/config toggle` — Enable/disable bot in this channel",
           "`/clear` — Clear the current session",
           "`/soul` — Show the bot personality",
+          "`/join` — Join your voice channel as a voice assistant",
+          "`/leave` — Leave the voice channel",
           "`/skills list` — List installed skills",
           "`/skills add-github <url>` — Install skill from GitHub",
           "`/skills add-file <file>` — Install skill from upload",
@@ -466,7 +558,7 @@ async function handleHelp(
       {
         name: "Features",
         value:
-          "Persistent memory, per-channel configuration, conversation sessions, tool use, and scheduled tasks.",
+          "Persistent memory, per-channel configuration, conversation sessions, tool use, scheduled tasks, and voice assistant.",
       },
     )
     .setColor(0x5865f2);

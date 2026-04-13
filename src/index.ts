@@ -21,6 +21,7 @@ import {
   setReflectionSendToDiscord,
   setReflectionChannelId,
 } from "./reflection/daemon.js";
+import { initVoice, setVoiceDiscordClient, destroyVoice } from "./voice/index.js";
 
 // Admin user ID for DM fallback delivery
 const ADMIN_USER_ID = "152801068663832576";
@@ -56,6 +57,16 @@ async function main(): Promise<void> {
     console.warn("[discordclaw] WARNING: gh CLI not authenticated — evolution PRs will fail");
   }
 
+  // 3.8 Initialize voice assistant
+  console.log("[discordclaw] Initializing voice assistant...");
+  let voiceReady = false;
+  try {
+    await initVoice();
+    voiceReady = true;
+  } catch (err) {
+    console.warn("[discordclaw] Voice assistant init failed (non-fatal):", err);
+  }
+
   // 4. Start cron service
   console.log("[discordclaw] Starting cron service...");
   const cronService = new CronService();
@@ -69,6 +80,11 @@ async function main(): Promise<void> {
   console.log("[discordclaw] Connecting to Discord...");
   const client = createClient();
   await startBot(client);
+
+  // Wire voice → Discord client (for user display name resolution)
+  if (voiceReady) {
+    setVoiceDiscordClient(client);
+  }
 
   // Wire cron → Discord delivery now that the client is ready
   cronService.setSendToDiscord(async (channelId, text, mentionUser) => {
@@ -182,6 +198,7 @@ async function main(): Promise<void> {
   console.log(`[discordclaw] Cron jobs: ${cronJobs.length}`);
   console.log(`[discordclaw] Skills: ${skillService.list().length}`);
   console.log(`[discordclaw] gh CLI: ${ghAvailable ? "ready" : "NOT AVAILABLE"}`);
+  console.log(`[discordclaw] Voice: ${voiceReady ? "ready" : "NOT AVAILABLE"}`);
   console.log(`[discordclaw] Reflection: ${reflectionChannelId ? `→ #${reflectionChannelId}` : "no channel (ideas only)"}`);
   console.log(`[discordclaw] Gateway: http://localhost:${port}`);
   console.log("[discordclaw] ========================================");
@@ -198,6 +215,9 @@ async function main(): Promise<void> {
 
     // Stop reflection daemon
     stopReflectionDaemon();
+
+    // Stop voice assistant
+    await destroyVoice();
 
     // Stop cron first (prevents new jobs from firing)
     cronService.stop();
@@ -226,6 +246,7 @@ async function main(): Promise<void> {
     (async () => {
       clearInterval(cleanupInterval);
       stopReflectionDaemon();
+      await destroyVoice();
       cronService.stop();
       stopSoulWatcher();
       stopMemoryWatcher();
