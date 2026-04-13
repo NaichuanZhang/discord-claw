@@ -93,25 +93,34 @@ export interface UserAudioStream {
 /**
  * Subscribe to a user's audio stream from a voice connection.
  * Decodes opus and downsamples to 16kHz mono for VAD processing.
+ *
+ * @param onStreamEnd - Called when the opus stream ends/closes, so the caller
+ *   can clean up and allow re-subscription on the next speaking:start event.
  */
 export function subscribeToUser(
   connection: VoiceConnection,
   userId: string,
   onFrame: (frame: Float32Array) => void,
   onRawPcm: (pcm: Int16Array) => void,
+  onStreamEnd?: () => void,
 ): UserAudioStream {
   const receiver = connection.receiver;
 
-  // Subscribe to the user's audio — get opus packets
+  // Subscribe to the user's audio — get opus packets.
+  // Use a generous AfterSilence duration so the stream stays alive during
+  // natural speech pauses. Our own VAD + silence timer handles utterance
+  // boundary detection, so we just need the opus stream to keep feeding us
+  // data as long as the user is reasonably active.
   const opusStream = receiver.subscribe(userId, {
     end: {
       behavior: 1, // AfterSilence
-      duration: 100,
+      duration: 5000, // 5 seconds — much more forgiving than 100ms
     },
   });
 
   let packetCount = 0;
   let decodeErrors = 0;
+  let ended = false;
 
   const handleData = (packet: Buffer) => {
     try {
@@ -139,15 +148,21 @@ export function subscribeToUser(
     }
   };
 
+  const handleEnd = () => {
+    if (ended) return;
+    ended = true;
+    console.log(`[voice:recv] Opus stream ended for ${userId} (total packets: ${packetCount})`);
+    onStreamEnd?.();
+  };
+
   opusStream.on("data", handleData);
 
   opusStream.on("close", () => {
     console.log(`[voice:recv] Opus stream closed for ${userId} (total packets: ${packetCount}, errors: ${decodeErrors})`);
+    handleEnd();
   });
 
-  opusStream.on("end", () => {
-    console.log(`[voice:recv] Opus stream ended for ${userId} (total packets: ${packetCount})`);
-  });
+  opusStream.on("end", handleEnd);
 
   const destroy = () => {
     console.log(`[voice:recv] Destroying audio stream for ${userId} (total packets: ${packetCount})`);

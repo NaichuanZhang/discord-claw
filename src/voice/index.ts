@@ -161,6 +161,8 @@ export async function startVoice(channel: VoiceBasedChannel): Promise<void> {
       (frame: Float32Array) => handleVadFrame(userId, frame),
       // onRawPcm: 48kHz stereo Int16 for buffering
       (pcm: Int16Array) => handleRawPcm(userId, pcm),
+      // onStreamEnd: clean up so re-subscription can happen
+      () => handleStreamEnd(userId),
     );
 
     userStreams.set(userId, stream);
@@ -215,6 +217,31 @@ export function stopVoice(): void {
 // ---------------------------------------------------------------------------
 // Audio processing pipeline
 // ---------------------------------------------------------------------------
+
+/**
+ * Handle the opus stream ending for a user.
+ * Cleans up userStreams so re-subscription can happen on the next speaking:start.
+ */
+function handleStreamEnd(userId: string): void {
+  console.log(`[voice] 🔌 Audio stream ended for ${userId}, cleaning up for re-subscription`);
+
+  // Remove the stream entry so next speaking:start will re-subscribe
+  userStreams.delete(userId);
+
+  // If user was mid-speech, fire the utterance completion
+  const state = userStates.get(userId);
+  if (state?.isSpeaking) {
+    dbg("stream", `User ${userId} was mid-speech when stream ended, completing utterance`);
+    if (state.silenceTimer) {
+      clearTimeout(state.silenceTimer);
+      state.silenceTimer = null;
+    }
+    onUtteranceComplete(userId);
+  }
+
+  // Clean up utterance state too — will be re-created on next speaking:start
+  userStates.delete(userId);
+}
 
 /**
  * Handle raw PCM data from a user (buffer for STT).
