@@ -22,6 +22,7 @@ import {
   setReflectionChannelId,
 } from "./reflection/daemon.js";
 import { initVoice, setVoiceDiscordClient, destroyVoice } from "./voice/index.js";
+import { enableAutoJoin, disableAutoJoin } from "./voice/autoJoin.js";
 
 // Admin user ID for DM fallback delivery
 const ADMIN_USER_ID = "152801068663832576";
@@ -84,6 +85,9 @@ async function main(): Promise<void> {
   // Wire voice → Discord client (for user display name resolution)
   if (voiceReady) {
     setVoiceDiscordClient(client);
+
+    // Enable auto-join/leave: bot follows the admin user in/out of voice channels
+    enableAutoJoin(client, ADMIN_USER_ID);
   }
 
   // Wire cron → Discord delivery now that the client is ready
@@ -198,7 +202,7 @@ async function main(): Promise<void> {
   console.log(`[discordclaw] Cron jobs: ${cronJobs.length}`);
   console.log(`[discordclaw] Skills: ${skillService.list().length}`);
   console.log(`[discordclaw] gh CLI: ${ghAvailable ? "ready" : "NOT AVAILABLE"}`);
-  console.log(`[discordclaw] Voice: ${voiceReady ? "ready" : "NOT AVAILABLE"}`);
+  console.log(`[discordclaw] Voice: ${voiceReady ? "ready (auto-join enabled)" : "NOT AVAILABLE"}`);
   console.log(`[discordclaw] Reflection: ${reflectionChannelId ? `→ #${reflectionChannelId}` : "no channel (ideas only)"}`);
   console.log(`[discordclaw] Gateway: http://localhost:${port}`);
   console.log("[discordclaw] ========================================");
@@ -215,6 +219,9 @@ async function main(): Promise<void> {
 
     // Stop reflection daemon
     stopReflectionDaemon();
+
+    // Disable auto-join before destroying voice
+    disableAutoJoin();
 
     // Stop voice assistant
     await destroyVoice();
@@ -246,6 +253,7 @@ async function main(): Promise<void> {
     (async () => {
       clearInterval(cleanupInterval);
       stopReflectionDaemon();
+      disableAutoJoin();
       await destroyVoice();
       cronService.stop();
       stopSoulWatcher();
