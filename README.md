@@ -11,7 +11,7 @@ A stripped-down Discord agent powered by Claude. Simplified fork of [openclaw](h
 - 💬 **Conversational AI** — @mention in channels or DM directly. Full conversation history per session.
 - 🧵 **Thread-First Replies** — In guild channels, every response goes into its own thread for clean session isolation. Monitored channels auto-respond without @mention.
 - 🎤 **Voice Message Support** — Send voice DMs and the bot transcribes them automatically via OpenAI Whisper.
-- 🎙️ **Voice Assistant** — Join voice channels with `/join`. Listens via Silero VAD, transcribes with EigenAI Whisper, thinks with Claude Sonnet, speaks back with EigenAI Chatterbox TTS. Supports interruptions and auto-disconnect.
+- 🎙️ **Voice Assistant** — Join voice channels with `/join`. Listens via Silero VAD, transcribes with EigenAI Whisper, thinks with Claude, speaks back with EigenAI Chatterbox TTS. Supports interruptions and auto-disconnect.
 - 🧠 **Persistent Memory** — Remembers things across conversations. Markdown files indexed with FTS5 full-text search.
 - 📜 **Conversation History** — Messages are archived across sessions. Query past conversations with `get_conversation_history` and `get_conversation_stats` tools.
 - 🎭 **Customizable Personality** — Edit `SOUL.md` to change how the bot behaves. Hot-reloads on save.
@@ -117,7 +117,7 @@ ANTHROPIC_API_KEY=your_anthropic_api_key
 OPENAI_API_KEY=your_openai_key          # Voice message transcription
 GATEWAY_PORT=3000                        # Dashboard port
 GATEWAY_TOKEN=your_secret_token          # Dashboard auth token
-ANTHROPIC_MODEL=claude-sonnet-4-20250514 # Model override
+ANTHROPIC_MODEL=bedrock-claude-opus-4-6-1m # Model override (this is the default)
 ```
 
 ### 4. Install & Run
@@ -186,10 +186,9 @@ git merge upstream/main
 | `REFLECTION_CHANNEL_ID` | No | Discord channel for reflection daemon proposals |
 | `REFLECTION_INTERVAL_HOURS` | No | How often the reflection daemon runs (default: `6`) |
 | `REFLECTION_LOOKBACK_HOURS` | No | Signal lookback window (default: `24`) |
-| `REFLECTION_MIN_SIGNALS` | No | Minimum signals before reflection triggers |
+| `REFLECTION_MIN_SIGNALS` | No | Minimum signals before reflection triggers (default: `3`) |
 | `EIGENAI_API_KEY` | No | EigenAI API key for voice STT (Whisper) and TTS (Chatterbox) |
 | `VOICE_MODEL` | No | Claude model for voice responses (default: `claude-sonnet-4-20250514`) |
-| `VOICE_MAX_TOKENS` | No | Max tokens for voice responses (default: `512`) |
 | `VOICE_SILENCE_MS` | No | Silence duration to end utterance (default: `1500`) |
 | `VOICE_MIN_UTTERANCE_MS` | No | Minimum utterance length, skip noise (default: `500`) |
 
@@ -219,7 +218,7 @@ git merge upstream/main
 
 **Voice Messages** — Discord voice DMs and audio attachments are automatically detected and transcribed using OpenAI's Whisper API. The transcribed text is passed to the agent as the message content. Requires `OPENAI_API_KEY`. Gracefully degrades with a helpful message if the API key isn't configured. Supports OGG, MP3, WAV, M4A, WebM, FLAC, and other common audio formats.
 
-**Voice Assistant** — Real-time voice interaction in Discord voice channels. Pipeline: user speaks → opus decode → downsample to 16kHz mono → Silero VAD (ONNX, ~2MB model) detects speech boundaries → EigenAI Whisper V3 Turbo transcribes → Claude Sonnet generates concise spoken response (1-3 sentences, no markdown) → EigenAI Chatterbox TTS synthesizes audio → bot speaks back. Supports interruptions (cuts off bot when user starts speaking), minimum utterance filtering (skips coughs/noise), and auto-disconnect after 10 minutes idle. Requires `EIGENAI_API_KEY`.
+**Voice Assistant** — Real-time voice interaction in Discord voice channels. Pipeline: user speaks → opus decode → downsample to 16kHz mono → Silero VAD (ONNX, ~2MB model) detects speech boundaries → EigenAI Whisper V3 Turbo transcribes → Claude generates concise spoken response (1-3 sentences, no markdown) → EigenAI Chatterbox TTS synthesizes audio → bot speaks back. Voice model defaults to `claude-sonnet-4-20250514` (configurable via `VOICE_MODEL`), max 512 tokens (hardcoded). Supports interruptions (cuts off bot when user starts speaking), minimum utterance filtering (skips coughs/noise), and auto-disconnect after 10 minutes idle. Requires `EIGENAI_API_KEY`.
 
 **Evolution Engine** — The bot can modify its own source code through GitHub pull requests. All changes are isolated in a git worktree at `beta/`, typechecked, and submitted as PRs via `gh` CLI. The agent has 9 evolution tools: `evolve_start`, `evolve_read`, `evolve_write`, `evolve_bash`, `evolve_propose`, `evolve_suggest`, `evolve_cancel`, `evolve_review`, and `evolve_merge`. Users can review PR diffs and merge directly from Discord — merging automatically triggers a restart to deploy the changes and posts a deployment notification thread to a configured channel. The bot also records ideas for improvements it can't yet make (`evolve_suggest`). Evolution history is tracked in SQLite and viewable in the dashboard.
 
@@ -459,7 +458,7 @@ graph LR
     end
 
     subgraph "🤖 Think"
-        D1[Voice Agent<br/>Claude Sonnet]
+        D1[Voice Agent<br/>Claude]
         D2[Memory Tools<br/>search / get]
     end
 
@@ -494,7 +493,7 @@ sequenceDiagram
     participant VAD as vad.ts<br/>(Silero ONNX)
     participant ORCH as index.ts<br/>(Orchestrator)
     participant STT as stt.ts<br/>(EigenAI Whisper)
-    participant AGT as agent.ts<br/>(Claude Sonnet)
+    participant AGT as agent.ts<br/>(Claude)
     participant MEM as Memory System
     participant TTS as tts.ts<br/>(EigenAI Chatterbox)
     participant AP as AudioPlayer
@@ -580,7 +579,7 @@ sequenceDiagram
             ORCH->>AGT: processVoiceUtterance(text, userName)
             AGT->>AGT: Build system prompt<br/>(voice rules + soul brief + time + speaker)
             AGT->>AGT: Append to ephemeral voiceHistory (max 10 turns)
-            AGT->>AGT: Claude messages.create()<br/>(model, 512 max_tokens, memory tools)
+            AGT->>AGT: Claude messages.create()<br/>(VOICE_MODEL, 512 max_tokens, memory tools)
 
             opt Claude requests tool_use
                 AGT->>MEM: handleMemoryTool(name, input)
@@ -664,7 +663,7 @@ graph TD
     P2 -->|"on utterance complete"| S1
     S1 --> S2 --> S3
     S3 --> A1
-    A1 -->|"text"| Claude["Claude Sonnet<br/>→ spoken response"]
+    A1 -->|"text"| Claude["Claude<br/>→ spoken response"]
     Claude -->|"text"| T1
     T1 --> PL1
     PL1 --> Speaker["🔊 Discord Voice Channel"]
@@ -751,7 +750,7 @@ graph TB
     subgraph "voice/agent.ts"
         VOICE_PROMPT["Voice system prompt<br/>1-3 sentences, no markdown"]
         HISTORY["Ephemeral voice history<br/>max 10 turns"]
-        PROCESS["processVoiceUtterance(text, userName)<br/>Claude Sonnet + memory tools"]
+        PROCESS["processVoiceUtterance(text, userName)<br/>Claude + memory tools"]
         CLEAR["clearVoiceHistory()<br/>reset on disconnect"]
     end
 
@@ -834,10 +833,10 @@ discordclaw/
 │   ├── bot/                   # Discord bot (discord.js v14)
 │   │   ├── client.ts          # Client setup, intents, event routing, DM raw fallback
 │   │   ├── messages.ts        # Message pipeline: filter → session → voice transcribe → agent → thread reply
-│   │   ├── commands.ts        # Slash commands: /ping /help /config /clear /soul /skills /cron /restart
+│   │   ├── commands.ts        # Slash commands: /ping /help /config /clear /soul /skills /cron /restart /join /leave
 │   │   └── components.ts      # Button/select interaction handler
 │   ├── agent/                 # Claude integration
-│   │   ├── agent.ts           # Anthropic SDK wrapper, system prompt, tool loop + duplicate detection
+│   │   ├── agent.ts           # Anthropic SDK wrapper, system prompt, tool loop + duplicate detection + conversation history tools
 │   │   ├── tools.ts           # Discord tools (send_message, send_file, add_reaction, get_channel_history, create_thread)
 │   │   ├── dangerous-tools.ts # Powerful tools: bash, read_file, write_file
 │   │   └── sessions.ts        # Per-thread/DM session tracking + TTL + message archiving
@@ -845,11 +844,11 @@ discordclaw/
 │   │   └── transcribe.ts      # Download + transcribe via OpenAI Whisper API
 │   ├── voice/                 # Voice assistant (real-time voice channel)
 │   │   ├── connection.ts      # Join/leave voice channels, VoiceConnection lifecycle
-│   │   ├── receiver.ts        # Opus decode, downsample 48kHz stereo → 16kHz mono
-│   │   ├── vad.ts             # Silero VAD wrapper (ONNX runtime)
+│   │   ├── receiver.ts        # Opus decode, auto-detect mono/stereo, downsample 48kHz → 16kHz mono
+│   │   ├── vad.ts             # Silero VAD wrapper (ONNX runtime, v4 model)
 │   │   ├── stt.ts             # EigenAI Whisper V3 Turbo STT client
 │   │   ├── tts.ts             # EigenAI Chatterbox TTS client
-│   │   ├── agent.ts           # Voice-optimized Claude (Sonnet, 512 tokens, spoken style)
+│   │   ├── agent.ts           # Voice-optimized Claude (default: Sonnet, configurable via VOICE_MODEL, 512 tokens, spoken style)
 │   │   └── index.ts           # Orchestrator: wires receive → VAD → STT → agent → TTS → play
 │   ├── skills/                # Skills management (SDK pattern)
 │   │   ├── types.ts           # Skill, SkillMeta, SkillSource types
