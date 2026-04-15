@@ -9,7 +9,7 @@ import {
   ChannelType,
 } from "discord.js";
 import { existsSync } from "fs";
-import { basename } from "path";
+import { basename, extname } from "path";
 import { processMessage } from "../agent/agent.js";
 import type { AgentResponse, AgentImage } from "../agent/agent.js";
 import { resolveSession, getSessionHistory } from "../agent/sessions.js";
@@ -332,6 +332,255 @@ async function buildImageContentBlocks(
 }
 
 // ---------------------------------------------------------------------------
+// Text file & document attachment handling
+// ---------------------------------------------------------------------------
+
+/**
+ * Text-based file extensions we recognize (by extension).
+ * These are fetched and their contents injected as document blocks.
+ */
+const TEXT_FILE_EXTENSIONS = new Set([
+  // Plain text & docs
+  ".txt", ".md", ".markdown", ".rst", ".org",
+  // Config / data
+  ".json", ".jsonl", ".yaml", ".yml", ".toml", ".ini", ".cfg", ".conf",
+  ".env", ".env.example", ".properties",
+  ".csv", ".tsv",
+  ".xml", ".svg",
+  // Programming languages
+  ".js", ".mjs", ".cjs", ".jsx",
+  ".ts", ".mts", ".cts", ".tsx",
+  ".py", ".pyw",
+  ".rb", ".rake",
+  ".go",
+  ".rs",
+  ".java", ".kt", ".kts", ".scala",
+  ".c", ".h", ".cpp", ".hpp", ".cc", ".cxx",
+  ".cs",
+  ".swift",
+  ".php",
+  ".r",
+  ".lua",
+  ".pl", ".pm",
+  ".sh", ".bash", ".zsh", ".fish",
+  ".bat", ".cmd", ".ps1",
+  ".zig", ".nim", ".ex", ".exs", ".erl", ".hrl",
+  ".hs", ".lhs",
+  ".clj", ".cljs", ".cljc",
+  ".ml", ".mli", ".elm",
+  ".dart", ".v", ".sol",
+  // Web
+  ".html", ".htm", ".css", ".scss", ".sass", ".less",
+  ".vue", ".svelte", ".astro",
+  // Build / CI
+  ".dockerfile", ".dockerignore",
+  ".gitignore", ".gitattributes",
+  ".editorconfig",
+  ".eslintrc", ".prettierrc",
+  // SQL
+  ".sql",
+  // Misc
+  ".log", ".diff", ".patch",
+  ".graphql", ".gql",
+  ".proto",
+  ".tf", ".hcl",
+  ".makefile",
+]);
+
+/**
+ * MIME type prefixes that indicate a text-based file
+ * (used as fallback when extension is unknown).
+ */
+const TEXT_MIME_PREFIXES = [
+  "text/",
+  "application/json",
+  "application/xml",
+  "application/javascript",
+  "application/typescript",
+  "application/x-yaml",
+  "application/toml",
+  "application/sql",
+  "application/graphql",
+  "application/x-sh",
+];
+
+/** Max text file size to fetch (1 MB — text files can be large but we need to be reasonable). */
+const MAX_TEXT_FILE_BYTES = 1 * 1024 * 1024;
+
+/** Max characters to include from a single text file (to avoid blowing up context). */
+const MAX_TEXT_FILE_CHARS = 500_000;
+
+/**
+ * Check if an attachment is a text-based file we can read.
+ */
+function isTextFileAttachment(att: { name: string | null; contentType: string | null; size: number }): boolean {
+  const name = att.name || "";
+  const ct = att.contentType?.toLowerCase() || "";
+
+  // Check by extension
+  const ext = extname(name).toLowerCase();
+
+  // Special case: files with no extension but a known name
+  const baseName = basename(name).toLowerCase();
+  const knownNames = new Set(["makefile", "dockerfile", "rakefile", "gemfile", "procfile", "jenkinsfile", "vagrantfile"]);
+
+  if (ext && TEXT_FILE_EXTENSIONS.has(ext)) return true;
+  if (knownNames.has(baseName)) return true;
+
+  // Fallback: check MIME type
+  if (ct && TEXT_MIME_PREFIXES.some((prefix) => ct.startsWith(prefix))) return true;
+
+  return false;
+}
+
+/**
+ * Check if an attachment is a PDF file.
+ */
+function isPdfAttachment(att: { name: string | null; contentType: string | null }): boolean {
+  const name = att.name || "";
+  const ct = att.contentType?.toLowerCase() || "";
+  return ct === "application/pdf" || extname(name).toLowerCase() === ".pdf";
+}
+
+/**
+ * Check if a Discord message has text file attachments (not images, not audio).
+ */
+function hasTextFileAttachments(message: DiscordMessage): boolean {
+  return message.attachments.some((att) => isTextFileAttachment(att));
+}
+
+/**
+ * Check if a Discord message has PDF attachments.
+ */
+function hasPdfAttachments(message: DiscordMessage): boolean {
+  return message.attachments.some((att) => isPdfAttachment(att));
+}
+
+/**
+ * Fetch text file attachments and build Anthropic DocumentBlockParam blocks.
+ * Uses PlainTextSource for text files.
+ */
+async function buildTextFileContentBlocks(
+  message: DiscordMessage,
+): Promise<Anthropic.Messages.DocumentBlockParam[]> {
+  const textAttachments = message.attachments.filter((att) => isTextFileAttachment(att));
+
+  if (textAttachments.size === 0) return [];
+
+  const blocks: Anthropic.Messages.DocumentBlockParam[] = [];
+
+  for (const [, attachment] of textAttachments) {
+    try {
+      // Skip overly large files
+      if (attachment.size && attachment.size > MAX_TEXT_FILE_BYTES) {
+        console.log(
+          `[bot] Skipping text file ${attachment.name} — too large (${(attachment.size / 1024).toFixed(0)} KB, max ${(MAX_TEXT_FILE_BYTES / 1024).toFixed(0)} KB)`,
+        );
+        continue;
+      }
+
+      const response = await fetch(attachment.url);
+      if (!response.ok) {
+        console.error(
+          `[bot] Failed to fetch text file ${attachment.name}: HTTP ${response.status}`,
+        );
+        continue;
+      }
+
+      let text = await response.text();
+
+      // Truncate if too long
+      if (text.length > MAX_TEXT_FILE_CHARS) {
+        text = text.slice(0, MAX_TEXT_FILE_CHARS) + `\n\n[... truncated at ${MAX_TEXT_FILE_CHARS.toLocaleString()} characters]`;
+        console.log(
+          `[bot] Truncated text file ${attachment.name} to ${MAX_TEXT_FILE_CHARS.toLocaleString()} characters`,
+        );
+      }
+
+      blocks.push({
+        type: "document",
+        source: {
+          type: "text",
+          media_type: "text/plain",
+          data: text,
+        },
+        title: attachment.name || undefined,
+      });
+
+      console.log(
+        `[bot] Loaded text file: ${attachment.name} (${text.length.toLocaleString()} chars)`,
+      );
+    } catch (err) {
+      console.error(
+        `[bot] Failed to process text file ${attachment.name}:`,
+        err,
+      );
+    }
+  }
+
+  return blocks;
+}
+
+/**
+ * Fetch PDF attachments and build Anthropic DocumentBlockParam blocks.
+ * Uses Base64PDFSource for PDFs.
+ */
+async function buildPdfContentBlocks(
+  message: DiscordMessage,
+): Promise<Anthropic.Messages.DocumentBlockParam[]> {
+  const pdfAttachments = message.attachments.filter((att) => isPdfAttachment(att));
+
+  if (pdfAttachments.size === 0) return [];
+
+  const blocks: Anthropic.Messages.DocumentBlockParam[] = [];
+
+  for (const [, attachment] of pdfAttachments) {
+    try {
+      // Skip overly large files (PDFs can be up to 32MB for Claude)
+      const maxPdfBytes = 32 * 1024 * 1024;
+      if (attachment.size && attachment.size > maxPdfBytes) {
+        console.log(
+          `[bot] Skipping PDF ${attachment.name} — too large (${(attachment.size / 1024 / 1024).toFixed(1)} MB, max 32 MB)`,
+        );
+        continue;
+      }
+
+      const response = await fetch(attachment.url);
+      if (!response.ok) {
+        console.error(
+          `[bot] Failed to fetch PDF ${attachment.name}: HTTP ${response.status}`,
+        );
+        continue;
+      }
+
+      const buffer = Buffer.from(await response.arrayBuffer());
+      const base64 = buffer.toString("base64");
+
+      blocks.push({
+        type: "document",
+        source: {
+          type: "base64",
+          media_type: "application/pdf",
+          data: base64,
+        },
+        title: attachment.name || undefined,
+      });
+
+      console.log(
+        `[bot] Loaded PDF: ${attachment.name} (${(buffer.length / 1024).toFixed(0)} KB)`,
+      );
+    } catch (err) {
+      console.error(
+        `[bot] Failed to process PDF ${attachment.name}:`,
+        err,
+      );
+    }
+  }
+
+  return blocks;
+}
+
+// ---------------------------------------------------------------------------
 // Thread creation helper
 // ---------------------------------------------------------------------------
 
@@ -484,11 +733,14 @@ export async function handleMessage(message: DiscordMessage): Promise<void> {
   const isVoice = isVoiceMessage(message);
   const hasAudio = hasAudioAttachments(message);
   const hasImages = hasImageAttachments(message);
+  const hasTextFiles = hasTextFileAttachments(message);
+  const hasPdfs = hasPdfAttachments(message);
+  const hasDocuments = hasTextFiles || hasPdfs;
   const inBotThread = isBotCreatedThread(message);
   const inMonitoredChannel = !isDM && isMonitoredChannel(message);
 
   console.log(
-    `[bot] Message from ${message.author.tag} isDM=${isDM} isVoice=${isVoice} hasAudio=${hasAudio} hasImages=${hasImages} inBotThread=${inBotThread} monitored=${inMonitoredChannel} content="${message.content.slice(0, 80)}"`,
+    `[bot] Message from ${message.author.tag} isDM=${isDM} isVoice=${isVoice} hasAudio=${hasAudio} hasImages=${hasImages} hasTextFiles=${hasTextFiles} hasPdfs=${hasPdfs} inBotThread=${inBotThread} monitored=${inMonitoredChannel} content="${message.content.slice(0, 80)}"`,
   );
 
   // 2. Filter: in guild channels, respond when mentioned OR when in a bot-created thread OR when in a monitored channel
@@ -554,8 +806,8 @@ export async function handleMessage(message: DiscordMessage): Promise<void> {
       } else {
         cleanContent = transcript;
       }
-    } else if (!cleanContent && !hasImages) {
-      // No transcription available and no text content and no images
+    } else if (!cleanContent && !hasImages && !hasDocuments) {
+      // No transcription available and no text content and no images and no documents
       if (!isTranscriptionAvailable()) {
         await message.reply(
           "🎤 I can see you sent a voice message, but voice transcription isn't configured yet. Ask an admin to set the `OPENAI_API_KEY` environment variable to enable it!",
@@ -586,19 +838,57 @@ export async function handleMessage(message: DiscordMessage): Promise<void> {
     }
   }
 
-  // If no text and no images, nothing to send
-  if (!cleanContent && imageBlocks.length === 0) return;
+  // 6d. Handle text file & PDF attachments — build Claude document content blocks
+  let documentBlocks: Anthropic.Messages.DocumentBlockParam[] = [];
+  if (hasDocuments) {
+    // Show typing while we fetch documents
+    if ("sendTyping" in message.channel) {
+      message.channel.sendTyping().catch(() => {});
+    }
 
-  // Build the message content — either a plain string or content blocks with images
+    const [textBlocks, pdfBlocks] = await Promise.all([
+      hasTextFiles ? buildTextFileContentBlocks(message) : Promise.resolve([]),
+      hasPdfs ? buildPdfContentBlocks(message) : Promise.resolve([]),
+    ]);
+
+    documentBlocks = [...textBlocks, ...pdfBlocks];
+
+    if (documentBlocks.length > 0) {
+      console.log(
+        `[bot] Prepared ${documentBlocks.length} document(s) (${textBlocks.length} text, ${pdfBlocks.length} PDF)`,
+      );
+    }
+  }
+
+  // If no text, no images, and no documents — nothing to send
+  if (!cleanContent && imageBlocks.length === 0 && documentBlocks.length === 0) return;
+
+  // Build the message content — either a plain string or content blocks with media
   let messageContent: string | Anthropic.Messages.ContentBlockParam[];
-  if (imageBlocks.length > 0) {
-    // Build content block array: images first, then text (if any)
-    const blocks: Anthropic.Messages.ContentBlockParam[] = [...imageBlocks];
+  const hasContentBlocks = imageBlocks.length > 0 || documentBlocks.length > 0;
+
+  if (hasContentBlocks) {
+    // Build content block array: documents first, then images, then text
+    const blocks: Anthropic.Messages.ContentBlockParam[] = [
+      ...documentBlocks,
+      ...imageBlocks,
+    ];
     if (cleanContent) {
       blocks.push({ type: "text", text: cleanContent });
-    } else {
-      // Images with no text — add a prompt so Claude knows to describe/analyze
+    } else if (imageBlocks.length > 0 && documentBlocks.length === 0) {
+      // Images with no text and no documents — add a prompt so Claude knows to describe/analyze
       blocks.push({ type: "text", text: "What do you see in this image?" });
+    } else {
+      // Documents with no text — add a neutral prompt
+      const fileNames = message.attachments
+        .filter((att) => isTextFileAttachment(att) || isPdfAttachment(att))
+        .map((att) => att.name)
+        .filter(Boolean)
+        .join(", ");
+      blocks.push({
+        type: "text",
+        text: `I've uploaded the following file(s): ${fileNames}. Please review ${documentBlocks.length === 1 ? "it" : "them"}.`,
+      });
     }
     messageContent = blocks;
   } else {
@@ -609,7 +899,7 @@ export async function handleMessage(message: DiscordMessage): Promise<void> {
   let replyTarget: DiscordMessage["channel"] | ThreadChannel = message.channel;
 
   if (shouldCreateThread) {
-    const thread = await createThreadForReply(message, cleanContent || "[Image]");
+    const thread = await createThreadForReply(message, cleanContent || "[Attachment]");
     if (thread) {
       replyTarget = thread;
       sessionThreadId = thread.id;
@@ -653,12 +943,15 @@ export async function handleMessage(message: DiscordMessage): Promise<void> {
 
   startTyping();
 
-  // For DB logging, use the text portion only (images are noted as attachment count)
+  // For DB logging, use the text portion only (attachments are noted as counts)
+  const attachmentParts: string[] = [];
+  if (imageBlocks.length > 0) attachmentParts.push(`${imageBlocks.length} image(s)`);
+  if (documentBlocks.length > 0) attachmentParts.push(`${documentBlocks.length} document(s)`);
+  const attachmentNote = attachmentParts.length > 0 ? `\n\n[${attachmentParts.join(", ")} attached]` : "";
+
   const logContent = cleanContent
-    ? (imageBlocks.length > 0
-        ? `${cleanContent}\n\n[${imageBlocks.length} image(s) attached]`
-        : cleanContent)
-    : `[${imageBlocks.length} image(s) attached]`;
+    ? `${cleanContent}${attachmentNote}`
+    : (attachmentNote ? attachmentNote.trim() : "");
 
   try {
     // 10. Agent dispatch — track latency
@@ -793,7 +1086,7 @@ export async function handleMessage(message: DiscordMessage): Promise<void> {
       );
     }
     console.log(
-      `[bot] Replied to ${message.author.tag} in ${channelName}${sessionThreadId ? ` (thread ${sessionThreadId})` : ""}${inMonitoredChannel ? " [monitored]" : ""} (session ${session.id})${imageCount > 0 ? ` with ${imageCount} image(s)` : ""}${isVoice ? " [voice]" : ""}${imageBlocks.length > 0 ? ` [${imageBlocks.length} input image(s)]` : ""}`,
+      `[bot] Replied to ${message.author.tag} in ${channelName}${sessionThreadId ? ` (thread ${sessionThreadId})` : ""}${inMonitoredChannel ? " [monitored]" : ""} (session ${session.id})${imageCount > 0 ? ` with ${imageCount} image(s)` : ""}${isVoice ? " [voice]" : ""}${imageBlocks.length > 0 ? ` [${imageBlocks.length} input image(s)]` : ""}${documentBlocks.length > 0 ? ` [${documentBlocks.length} document(s)]` : ""}`,
     );
   } catch (err) {
     stopTyping();
