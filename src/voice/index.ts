@@ -486,6 +486,10 @@ async function onUtteranceComplete(userId: string): Promise<void> {
 
     const [fullResponse] = await Promise.all([generateTask, playTask]);
 
+    // Drain any un-awaited TTS promises so aborted fetches don't become
+    // unhandled rejections (playTask may break out before reaching them all).
+    await Promise.allSettled(audioQueue);
+
     const agentElapsed = Date.now() - agentStart;
     const totalElapsed = Date.now() - pipelineStart;
     console.log(`[voice] ✅ Pipeline complete in ${totalElapsed}ms (STT=${sttElapsed}ms, Agent+TTS+Play=${agentElapsed}ms, sentences=${sentenceCount})`);
