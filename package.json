@@ -6,7 +6,8 @@
     "dev": "tsx src/index.ts",
     "build": "tsc && vite build",
     "build:ui": "vite build",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "daemon": "tsx src/daemon/index.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.39.0",

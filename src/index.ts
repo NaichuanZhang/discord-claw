@@ -1,7 +1,5 @@
 import "dotenv/config";
 
-import { spawn } from "node:child_process";
-import path from "node:path";
 import { initDb } from "./db/index.js";
 import { initSoul, stopSoulWatcher } from "./soul/soul.js";
 import { initMemory, stopMemoryWatcher } from "./memory/memory.js";
@@ -301,9 +299,9 @@ async function main(): Promise<void> {
   process.on("SIGINT", () => shutdown("SIGINT"));
   process.on("SIGTERM", () => shutdown("SIGTERM"));
 
-  // Wire restart: graceful shutdown → exec start.sh (full deploy pipeline)
+  // Wire restart: graceful shutdown → exit 100 (daemon handles deploy + restart)
   setRestartHandler(() => {
-    console.log("[discordclaw] Restart requested — handing off to start.sh...");
+    console.log("[discordclaw] Restart requested — signaling daemon (exit 100)...");
     (async () => {
       clearInterval(cleanupInterval);
       stopReflectionDaemon();
@@ -316,22 +314,23 @@ async function main(): Promise<void> {
       gateway.close();
       await stopBot(client);
 
-      // Resolve the repo root directory (where start.sh lives)
-      const repoRoot = path.resolve(import.meta.dirname ?? ".", "..");
-      const startScript = path.join(repoRoot, "start.sh");
-
-      // Spawn start.sh detached — it will handle git pull, build, and launching a new instance
-      // start.sh also kills any remaining instances before starting fresh
-      const child = spawn("bash", [startScript], {
-        detached: true,
-        stdio: "inherit",
-        cwd: repoRoot,
-      });
-      child.unref();
-      process.exit(0);
+      process.exit(100);
     })();
   });
 }
+
+// ---------------------------------------------------------------------------
+// Crash handlers — ensure unhandled errors produce a clean exit for the daemon
+// ---------------------------------------------------------------------------
+process.on("uncaughtException", (err) => {
+  console.error("[discordclaw] Uncaught exception:", err);
+  process.exit(1);
+});
+
+process.on("unhandledRejection", (reason) => {
+  console.error("[discordclaw] Unhandled rejection:", reason);
+  process.exit(1);
+});
 
 main().catch((err) => {
   console.error("[discordclaw] Fatal error:", err);

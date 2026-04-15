@@ -1,0 +1,17 @@
+[Unit]
+Description=Discordclaw Watchdog Daemon
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/alex/discordclaw
+ExecStart=/usr/bin/npx tsx src/daemon/index.ts
+Restart=always
+RestartSec=5
+EnvironmentFile=/home/alex/discordclaw/.env
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=discordclaw
+
+[Install]
+WantedBy=multi-user.target
