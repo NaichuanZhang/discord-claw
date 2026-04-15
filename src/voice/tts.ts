@@ -19,7 +19,7 @@ const EIGENAI_TTS_URL = "https://api-web.eigenai.com/api/chatterbox";
  * @param text The text to speak
  * @returns WAV audio buffer
  */
-export async function synthesize(text: string): Promise<Buffer> {
+export async function synthesize(text: string, signal?: AbortSignal): Promise<Buffer> {
   const apiKey = process.env.EIGENAI_API_KEY;
   if (!apiKey) {
     throw new Error("EIGENAI_API_KEY environment variable is not set");
@@ -36,6 +36,7 @@ export async function synthesize(text: string): Promise<Buffer> {
       Authorization: `Bearer ${apiKey}`,
     },
     body: JSON.stringify({ text }),
+    signal,
   });
 
   if (!response.ok) {

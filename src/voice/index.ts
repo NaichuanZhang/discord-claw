@@ -22,13 +22,13 @@ import { subscribeToUser, downsampleToMono16kInt16, type UserAudioStream } from 
 import { SileroVAD, FRAME_SIZE } from "./vad.js";
 import { transcribe } from "./stt.js";
 import { synthesize } from "./tts.js";
-import { processVoiceUtterance, clearVoiceHistory } from "./agent.js";
+import { processVoiceUtteranceStreaming, clearVoiceHistory } from "./agent.js";
 
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
 
-const SILENCE_DURATION_MS = parseInt(process.env.VOICE_SILENCE_MS || "1500", 10);
+const SILENCE_DURATION_MS = parseInt(process.env.VOICE_SILENCE_MS || "800", 10);
 const MIN_UTTERANCE_MS = parseInt(process.env.VOICE_MIN_UTTERANCE_MS || "500", 10);
 const IDLE_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes
 
@@ -55,6 +55,7 @@ let vad: SileroVAD | null = null;
 let audioPlayer = createAudioPlayer();
 let userStreams: Map<string, UserAudioStream> = new Map();
 let processing = false;
+let pipelineAbort: AbortController | null = null;
 let idleTimer: ReturnType<typeof setTimeout> | null = null;
 let discordClient: Client | null = null;
 
@@ -310,10 +311,11 @@ async function handleVadFrame(userId: string, frame: Float32Array): Promise<void
             state.totalRawSamples = 0;
             console.log(`[voice] 🎤 Speech STARTED from ${userId} (prob=${prob.toFixed(3)})`);
 
-            // If bot is speaking, interrupt it
-            if (audioPlayer.state.status === AudioPlayerStatus.Playing) {
-              console.log("[voice] ⚡ Interrupting bot playback");
+            // If bot is speaking or processing, interrupt it
+            if (audioPlayer.state.status === AudioPlayerStatus.Playing || pipelineAbort) {
+              console.log("[voice] ⚡ Interrupting bot playback/pipeline");
               audioPlayer.stop();
+              pipelineAbort?.abort();
             }
           }
 
@@ -394,6 +396,8 @@ async function onUtteranceComplete(userId: string): Promise<void> {
   vad?.reset();
 
   processing = true;
+  const abortController = new AbortController();
+  pipelineAbort = abortController;
   const pipelineStart = Date.now();
 
   try {
@@ -410,10 +414,10 @@ async function onUtteranceComplete(userId: string): Promise<void> {
     const mono16k = downsampleToMono16kInt16(rawPcm, channels);
 
     const durationSec = mono16k.length / 16000;
-    console.log(`[voice] 📝 Step 1/5: Audio ready — ${durationSec.toFixed(1)}s, ${totalSamples} raw samples → ${mono16k.length} mono16k samples (${channels}ch)`);
+    console.log(`[voice] 📝 Step 1: Audio ready — ${durationSec.toFixed(1)}s, ${totalSamples} raw samples → ${mono16k.length} mono16k samples (${channels}ch)`);
 
     // 3. STT
-    console.log(`[voice] 📝 Step 2/5: Transcribing (STT)...`);
+    console.log(`[voice] 📝 Step 2: Transcribing (STT)...`);
     const sttStart = Date.now();
     const text = await transcribe(mono16k);
     const sttElapsed = Date.now() - sttStart;
@@ -422,6 +426,7 @@ async function onUtteranceComplete(userId: string): Promise<void> {
       console.log(`[voice] ⏭️ Empty transcription after ${sttElapsed}ms, skipping`);
       return;
     }
+    if (abortController.signal.aborted) return;
 
     console.log(`[voice] 🗣️ STT result (${sttElapsed}ms): "${text}"`);
 
@@ -429,36 +434,72 @@ async function onUtteranceComplete(userId: string): Promise<void> {
     const userName = await getUserDisplayName(userId);
     dbg("pipeline", `User display name: ${userName}`);
 
-    // 5. Claude voice agent
-    console.log(`[voice] 📝 Step 3/5: Generating response (Claude)...`);
+    // 5. Streaming pipeline: Claude → sentence-level TTS → sequential playback
+    //    As Claude generates each sentence, fire TTS immediately.
+    //    Play sentences in order as their audio becomes available.
+    console.log(`[voice] 📝 Step 3: Streaming response + TTS pipelining...`);
     const agentStart = Date.now();
-    const response = await processVoiceUtterance(text, userName);
+    const audioQueue: Promise<Buffer>[] = [];
+    let generationDone = false;
+    let sentenceCount = 0;
+
+    // Task 1: Stream sentences from Claude and fire TTS for each
+    const generateTask = processVoiceUtteranceStreaming(
+      text,
+      userName,
+      (sentence: string) => {
+        sentenceCount++;
+        console.log(`[voice] 📝 Sentence ${sentenceCount}: "${sentence}"`);
+        audioQueue.push(synthesize(sentence, abortController.signal));
+      },
+      abortController.signal,
+    ).then((fullResponse) => {
+      generationDone = true;
+      return fullResponse;
+    });
+
+    // Task 2: Play audio as it becomes available, in order
+    const playTask = (async () => {
+      let playIndex = 0;
+      while (true) {
+        if (abortController.signal.aborted) break;
+
+        if (playIndex < audioQueue.length) {
+          try {
+            const audio = await audioQueue[playIndex];
+            if (!abortController.signal.aborted) {
+              await playAudio(audio);
+            }
+          } catch (err) {
+            if ((err as Error).name === "AbortError") break;
+            console.error(`[voice] TTS/play error for sentence ${playIndex + 1}:`, err);
+          }
+          playIndex++;
+        } else if (generationDone) {
+          break;
+        } else {
+          // Wait briefly for next sentence to arrive
+          await new Promise((r) => setTimeout(r, 50));
+        }
+      }
+    })();
+
+    const [fullResponse] = await Promise.all([generateTask, playTask]);
+
     const agentElapsed = Date.now() - agentStart;
-
-    console.log(`[voice] 🤖 Agent response (${agentElapsed}ms): "${response}"`);
-
-    // 6. TTS
-    console.log(`[voice] 📝 Step 4/5: Synthesizing speech (TTS)...`);
-    const ttsStart = Date.now();
-    const audioBuffer = await synthesize(response);
-    const ttsElapsed = Date.now() - ttsStart;
-
-    console.log(`[voice] 🔊 TTS result (${ttsElapsed}ms): ${audioBuffer.length} bytes`);
-
-    // 7. Play audio
-    console.log(`[voice] 📝 Step 5/5: Playing audio...`);
-    const playStart = Date.now();
-    await playAudio(audioBuffer);
-    const playElapsed = Date.now() - playStart;
-
     const totalElapsed = Date.now() - pipelineStart;
-    console.log(`[voice] ✅ Pipeline complete in ${totalElapsed}ms (STT=${sttElapsed}ms, Agent=${agentElapsed}ms, TTS=${ttsElapsed}ms, Play=${playElapsed}ms)`);
-    console.log(`[voice] ✅ "${text}" → "${response}"`);
+    console.log(`[voice] ✅ Pipeline complete in ${totalElapsed}ms (STT=${sttElapsed}ms, Agent+TTS+Play=${agentElapsed}ms, sentences=${sentenceCount})`);
+    console.log(`[voice] ✅ "${text}" → "${fullResponse}"`);
   } catch (err) {
-    const totalElapsed = Date.now() - pipelineStart;
-    console.error(`[voice] ❌ Pipeline error after ${totalElapsed}ms:`, err);
+    if (abortController.signal.aborted) {
+      console.log(`[voice] ⚡ Pipeline aborted (interrupted by user)`);
+    } else {
+      const totalElapsed = Date.now() - pipelineStart;
+      console.error(`[voice] ❌ Pipeline error after ${totalElapsed}ms:`, err);
+    }
   } finally {
     processing = false;
+    pipelineAbort = null;
   }
 }
 

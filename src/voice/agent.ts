@@ -6,6 +6,9 @@
  * 1-3 sentences).
  *
  * Has the same tools as the main agent EXCEPT for evolution tools.
+ *
+ * Supports streaming mode: sentences are delivered via callback as Claude
+ * generates them, enabling sentence-level TTS pipelining.
  */
 
 import Anthropic from "@anthropic-ai/sdk";
@@ -31,7 +34,7 @@ const client = new Anthropic({
 // ---------------------------------------------------------------------------
 
 const DEFAULT_VOICE_MODEL = "claude-sonnet-4-20250514";
-const VOICE_MAX_TOKENS = 1024;
+const VOICE_MAX_TOKENS = parseInt(process.env.VOICE_MAX_TOKENS || "512", 10);
 const MAX_TOOL_ROUNDS = 5; // Max tool-use rounds before forcing a text response
 
 function getVoiceModel(): string {
@@ -157,13 +160,24 @@ function handleConversationHistoryTool(
 // Voice tools — everything except evolution
 // ---------------------------------------------------------------------------
 
-const voiceTools: Anthropic.Messages.Tool[] = [
+const fullVoiceTools: Anthropic.Messages.Tool[] = [
   ...conversationHistoryTools,
   ...memoryTools,
   ...discordTools,
   ...skillTools,
   ...dangerousTools,
 ] as Anthropic.Messages.Tool[];
+
+const minimalVoiceTools: Anthropic.Messages.Tool[] = [
+  ...conversationHistoryTools,
+  ...memoryTools,
+] as Anthropic.Messages.Tool[];
+
+const VOICE_TOOLS_MODE = process.env.VOICE_TOOLS_MODE || "full";
+
+function getVoiceTools(): Anthropic.Messages.Tool[] {
+  return VOICE_TOOLS_MODE === "minimal" ? minimalVoiceTools : fullVoiceTools;
+}
 
 // ---------------------------------------------------------------------------
 // Tool dispatch
@@ -223,7 +237,208 @@ export function clearVoiceHistory(): void {
 }
 
 // ---------------------------------------------------------------------------
-// Process a voice utterance
+// Sentence boundary detection
+// ---------------------------------------------------------------------------
+
+/** Common abbreviations that should NOT trigger a sentence split. */
+const ABBREVIATIONS = /(?:Mr|Mrs|Ms|Dr|Jr|Sr|St|Prof|vs|etc|e\.g|i\.e)\s*$/i;
+
+/**
+ * Find the first sentence boundary in text.
+ * Returns the index AFTER the punctuation mark, or -1 if no boundary found.
+ * For voice output, splitting too eagerly is better than waiting too long.
+ */
+function findSentenceBoundary(text: string): number {
+  const pattern = /[.!?]\s/g;
+  let match;
+  while ((match = pattern.exec(text)) !== null) {
+    // Skip common abbreviations
+    const before = text.slice(Math.max(0, match.index - 6), match.index);
+    if (ABBREVIATIONS.test(before)) continue;
+    return match.index + 1; // position after the punctuation mark
+  }
+  return -1;
+}
+
+// ---------------------------------------------------------------------------
+// Build voice context (shared between streaming and non-streaming)
+// ---------------------------------------------------------------------------
+
+function buildVoiceContext(
+  text: string,
+  displayName: string,
+): { systemPrompt: string; messages: Anthropic.Messages.MessageParam[] } {
+  const systemParts: string[] = [VOICE_SYSTEM_PROMPT];
+  const soul = getSoul();
+  if (soul) {
+    const soulBrief = soul.split("\n").slice(0, 5).join("\n");
+    systemParts.push(`Personality: ${soulBrief}`);
+  }
+
+  const skillsPrompt = getSkillService()?.buildSkillsPromptSection();
+  if (skillsPrompt) {
+    systemParts.push(skillsPrompt);
+  }
+
+  const now = new Date().toLocaleString("en-US", {
+    weekday: "long",
+    hour: "numeric",
+    minute: "2-digit",
+    timeZoneName: "short",
+  });
+  systemParts.push(`Current time: ${now}`);
+  systemParts.push(`Speaking with: ${displayName}`);
+
+  const systemPrompt = systemParts.join("\n\n");
+
+  const messages: Anthropic.Messages.MessageParam[] = [];
+  for (const turn of voiceHistory) {
+    messages.push({ role: turn.role, content: turn.content });
+  }
+  messages.push({ role: "user", content: text });
+
+  return { systemPrompt, messages };
+}
+
+// ---------------------------------------------------------------------------
+// Streaming voice utterance processing
+// ---------------------------------------------------------------------------
+
+/**
+ * Process a voice utterance with streaming — delivers sentences via callback
+ * as Claude generates them, enabling sentence-level TTS pipelining.
+ *
+ * @param text Transcribed speech from the user
+ * @param displayName Display name of the speaker
+ * @param onSentence Called with each complete sentence as it becomes available
+ * @param signal Optional AbortSignal to cancel mid-stream
+ * @returns Full response text when complete
+ */
+export async function processVoiceUtteranceStreaming(
+  text: string,
+  displayName: string,
+  onSentence: (sentence: string) => void,
+  signal?: AbortSignal,
+): Promise<string> {
+  const startTime = Date.now();
+
+  console.log(`[voice-agent] Streaming utterance from ${displayName}: "${text}"`);
+  console.log(`[voice-agent] Voice history: ${voiceHistory.length} turns, model: ${getVoiceModel()}`);
+
+  const { systemPrompt, messages } = buildVoiceContext(text, displayName);
+  const tools = getVoiceTools();
+
+  const allText: string[] = [];
+  let sentenceBuffer = "";
+  let toolRound = 0;
+
+  function flushSentences(): void {
+    let boundary = findSentenceBoundary(sentenceBuffer);
+    while (boundary > 0) {
+      const sentence = sentenceBuffer.slice(0, boundary).trim();
+      sentenceBuffer = sentenceBuffer.slice(boundary).trimStart();
+      if (sentence) {
+        allText.push(sentence);
+        onSentence(sentence);
+      }
+      boundary = findSentenceBoundary(sentenceBuffer);
+    }
+  }
+
+  let continueLoop = true;
+
+  while (continueLoop) {
+    if (signal?.aborted) break;
+
+    const stream = client.messages.stream({
+      model: getVoiceModel(),
+      max_tokens: VOICE_MAX_TOKENS,
+      system: systemPrompt,
+      messages,
+      tools: tools.length > 0 ? tools : undefined,
+    });
+
+    // Wire up abort signal to cancel the stream
+    if (signal) {
+      const onAbort = () => stream.abort();
+      signal.addEventListener("abort", onAbort, { once: true });
+      // Clean up listener when stream ends (avoid leak)
+      stream.on("end", () => signal.removeEventListener("abort", onAbort));
+    }
+
+    // Accumulate text deltas and flush sentences as they complete
+    stream.on("text", (delta: string) => {
+      sentenceBuffer += delta;
+      flushSentences();
+    });
+
+    let finalMessage: Anthropic.Message;
+    try {
+      finalMessage = await stream.finalMessage();
+    } catch (err) {
+      if (signal?.aborted) break;
+      throw err;
+    }
+
+    console.log(`[voice-agent] Stream complete: stop_reason=${finalMessage.stop_reason}, blocks=${finalMessage.content.length}`);
+
+    // Flush any remaining text from this round
+    if (sentenceBuffer.trim()) {
+      allText.push(sentenceBuffer.trim());
+      onSentence(sentenceBuffer.trim());
+      sentenceBuffer = "";
+    }
+
+    // Handle tool use
+    if (finalMessage.stop_reason === "tool_use" && toolRound < MAX_TOOL_ROUNDS) {
+      toolRound++;
+      console.log(`[voice-agent] Tool round ${toolRound}/${MAX_TOOL_ROUNDS}`);
+
+      messages.push({ role: "assistant", content: finalMessage.content });
+
+      const toolResults: Anthropic.Messages.ToolResultBlockParam[] = [];
+
+      for (const block of finalMessage.content) {
+        if (block.type === "tool_use") {
+          console.log(`[voice-agent] Executing tool: ${block.name}`);
+          const result = await executeVoiceTool(
+            block.name,
+            block.input as Record<string, unknown>,
+          );
+          console.log(`[voice-agent] Tool result (${block.name}): ${result.slice(0, 200)}`);
+          toolResults.push({
+            type: "tool_result",
+            tool_use_id: block.id,
+            content: result,
+          });
+        }
+      }
+
+      messages.push({ role: "user", content: toolResults });
+      // Continue loop — will make another streaming call
+    } else {
+      continueLoop = false;
+    }
+  }
+
+  const fullResponse = allText.join(" ").trim();
+  const elapsed = Date.now() - startTime;
+
+  console.log(`[voice-agent] ✅ Streaming response in ${elapsed}ms (${toolRound} tool rounds): "${fullResponse}"`);
+
+  // Update history
+  voiceHistory.push({ role: "user", content: text });
+  voiceHistory.push({ role: "assistant", content: fullResponse || "..." });
+
+  while (voiceHistory.length > MAX_VOICE_HISTORY * 2) {
+    voiceHistory.shift();
+  }
+
+  return fullResponse || "Sorry, I didn't have anything to say to that.";
+}
+
+// ---------------------------------------------------------------------------
+// Non-streaming fallback (kept for compatibility)
 // ---------------------------------------------------------------------------
 
 /**
@@ -241,40 +456,8 @@ export async function processVoiceUtterance(
   console.log(`[voice-agent] Processing utterance from ${userName}: "${text}"`);
   console.log(`[voice-agent] Voice history: ${voiceHistory.length} turns, model: ${getVoiceModel()}`);
 
-  // Build system prompt with soul
-  const systemParts: string[] = [VOICE_SYSTEM_PROMPT];
-  const soul = getSoul();
-  if (soul) {
-    // Only include a brief personality note, not the full soul
-    const soulBrief = soul.split("\n").slice(0, 5).join("\n");
-    systemParts.push(`Personality: ${soulBrief}`);
-  }
-
-  // Skills section
-  const skillsPrompt = getSkillService()?.buildSkillsPromptSection();
-  if (skillsPrompt) {
-    systemParts.push(skillsPrompt);
-  }
-
-  const now = new Date().toLocaleString("en-US", {
-    weekday: "long",
-    hour: "numeric",
-    minute: "2-digit",
-    timeZoneName: "short",
-  });
-  systemParts.push(`Current time: ${now}`);
-  systemParts.push(`Speaking with: ${userName}`);
-
-  const systemPrompt = systemParts.join("\n\n");
-
-  // Build messages with history
-  const messages: Anthropic.Messages.MessageParam[] = [];
-
-  for (const turn of voiceHistory) {
-    messages.push({ role: turn.role, content: turn.content });
-  }
-
-  messages.push({ role: "user", content: text });
+  const { systemPrompt, messages } = buildVoiceContext(text, userName);
+  const tools = getVoiceTools();
 
   // Call Claude with tool loop
   const collectedText: string[] = [];
@@ -285,7 +468,7 @@ export async function processVoiceUtterance(
     max_tokens: VOICE_MAX_TOKENS,
     system: systemPrompt,
     messages,
-    tools: voiceTools,
+    tools: tools.length > 0 ? tools : undefined,
   });
 
   console.log(`[voice-agent] Claude response: stop_reason=${response.stop_reason}, content blocks=${response.content.length}`);
@@ -335,7 +518,7 @@ export async function processVoiceUtterance(
       max_tokens: VOICE_MAX_TOKENS,
       system: systemPrompt,
       messages,
-      tools: voiceTools,
+      tools: tools.length > 0 ? tools : undefined,
     });
 
     console.log(`[voice-agent] Follow-up response: stop_reason=${response.stop_reason}, blocks=${response.content.length}`);
