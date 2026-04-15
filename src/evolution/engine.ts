@@ -164,7 +164,7 @@ export async function startEvolution(opts: {
 }
 
 /**
- * Finalize an evolution: typecheck, commit, push, create PR.
+ * Finalize an evolution: typecheck, run tests, commit, push, create PR.
  */
 export async function finalizeEvolution(opts: {
   id: string;
@@ -193,7 +193,20 @@ export async function finalizeEvolution(opts: {
     throw new Error(`Typecheck failed in worktree:\n${output.slice(0, 4000)}`);
   }
 
-  // 2. Stage and commit all changes
+  // 2. Run integration tests in worktree
+  log("Running integration tests in worktree...");
+  try {
+    await execFileAsync("npx", ["vitest", "run"], {
+      cwd: BETA_DIR,
+      timeout: 120_000,
+      maxBuffer: 1024 * 1024,
+    });
+  } catch (err: any) {
+    const output = (err.stdout || "") + "\n" + (err.stderr || "");
+    throw new Error(`Integration tests failed in worktree:\n${output.slice(0, 4000)}`);
+  }
+
+  // 3. Stage and commit all changes
   await git(["add", "-A"], { cwd: BETA_DIR });
 
   const { stdout: diffOutput } = await git(
@@ -213,11 +226,11 @@ export async function finalizeEvolution(opts: {
     { cwd: BETA_DIR },
   );
 
-  // 3. Push branch
+  // 4. Push branch
   log(`Pushing branch ${evolution.branch}...`);
   await git(["push", "-u", "origin", evolution.branch!], { cwd: BETA_DIR });
 
-  // 4. Create PR via gh CLI
+  // 5. Create PR via gh CLI
   log("Creating PR...");
   const migrationFiles = filesChanged.filter((f) => f.startsWith("migrations/"));
   const prBody = [
@@ -233,6 +246,10 @@ export async function finalizeEvolution(opts: {
     migrationFiles.length > 0
       ? migrationFiles.map((f) => `- \`${f}\``).join("\n")
       : "None",
+    "",
+    "### Quality Gates",
+    "- ✅ TypeScript typecheck passed",
+    "- ✅ Integration tests passed",
     "",
     "---",
     "*This PR was created by the Evolution Engine.*",
@@ -256,7 +273,7 @@ export async function finalizeEvolution(opts: {
   const prNumberMatch = prUrl.match(/\/pull\/(\d+)/);
   const prNumber = prNumberMatch ? parseInt(prNumberMatch[1], 10) : 0;
 
-  // 5. Update evolution record
+  // 6. Update evolution record
   updateEvolution(opts.id, {
     status: "proposed",
     prUrl,
@@ -266,11 +283,11 @@ export async function finalizeEvolution(opts: {
     proposedAt: Date.now(),
   });
 
-  // 6. Clean up worktree
+  // 7. Clean up worktree
   log("Cleaning up worktree...");
   await git(["worktree", "remove", "beta", "--force"]);
 
-  // 7. Notify Discord
+  // 8. Notify Discord
   if (_sendToDiscord && opts.channelId) {
     try {
       await _sendToDiscord(

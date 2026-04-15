@@ -8,11 +8,28 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 npm run dev          # Start bot + gateway (tsx src/index.ts)
 npm run build        # TypeScript compile + Vite build dashboard
 npm run build:ui     # Build dashboard SPA only
-npm run typecheck    # tsc --noEmit (no test suite exists)
+npm run typecheck    # tsc --noEmit
+npm test             # Run integration tests (vitest run)
+npm run test:watch   # Run tests in watch mode
 ./start.sh           # Production: git pull → migrate → build → start → health check → rollback
 ```
 
 The dashboard SPA lives at `src/gateway/ui/` and builds to `dist/ui/`. Vite dev server proxies `/api` and `/ws` to localhost:3000. The UI is excluded from `tsconfig.json` — it's built by Vite with its own React plugin.
+
+## Testing
+
+Integration tests live in `tests/integration/` and use **vitest**. They validate the critical boot path without calling external APIs:
+
+- **Database**: Schema init, table existence, CRUD operations
+- **Soul**: Loading and hot-reload from `data/SOUL.md`
+- **Memory**: FTS5 indexing, search queries
+- **Skills**: Service init, prompt section generation
+- **Image extraction**: Pure function — markdown parsing for URL/file images
+- **Tool registration**: All tool arrays export correctly with unique names
+
+Tests run automatically as a quality gate in the evolution engine — `finalizeEvolution()` runs both `tsc --noEmit` and `vitest run` before allowing a PR to be created. If tests fail, the PR is blocked.
+
+To add new tests, create files matching `tests/**/*.test.ts`.
 
 ## Architecture
 
@@ -29,7 +46,7 @@ Key constants in `agent/agent.ts`: `DEFAULT_MODEL = "bedrock-claude-opus-4-6-1m"
 Tools are defined across multiple files and registered in `agent/agent.ts`:
 
 | File | Tools | Purpose |
-|------|-------|---------|
+|------|-------|---------
 | `agent/tools.ts` | send_message, send_file, add_reaction, get_channel_history, create_thread | Discord channel operations |
 | `agent/dangerous-tools.ts` | bash, read_file, write_file | System access |
 | `agent/agent.ts` | get_conversation_history, get_conversation_stats | Cross-session conversation replay |
@@ -65,7 +82,12 @@ Scheduled tasks in `data/cron/jobs.json` (gitignored; seed file tracked). Three 
 
 ### Evolution Engine
 
-Self-modification via GitHub PRs. `src/evolution/engine.ts` manages git worktrees at `beta/`, runs typecheck, pushes branches, creates PRs via `gh` CLI. Evolution status flow: `idea` → `proposing` → `proposed` (PR open) → `deployed` (merged). Also: `cancelled`, `rejected`, `rolled_back`. On startup, `syncDeployedEvolutions()` checks if proposed PRs were merged. `evolve_merge` merges the PR, posts a deployment notification thread to a configured channel, and triggers restart.
+Self-modification via GitHub PRs. `src/evolution/engine.ts` manages git worktrees at `beta/`, runs typecheck and integration tests, pushes branches, creates PRs via `gh` CLI. Evolution status flow: `idea` → `proposing` → `proposed` (PR open) → `deployed` (merged). Also: `cancelled`, `rejected`, `rolled_back`. On startup, `syncDeployedEvolutions()` checks if proposed PRs were merged. `evolve_merge` merges the PR, posts a deployment notification thread to a configured channel, and triggers restart.
+
+**Quality gates in `finalizeEvolution()`:**
+1. `tsc --noEmit` — TypeScript typecheck
+2. `vitest run` — Integration tests (120s timeout)
+3. Both must pass before the PR is created
 
 ### Reflection System
 
