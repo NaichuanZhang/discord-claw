@@ -191,6 +191,8 @@ git merge upstream/main
 | `VOICE_MODEL` | No | Claude model for voice responses (default: `claude-sonnet-4-20250514`) |
 | `VOICE_SILENCE_MS` | No | Silence duration to end utterance (default: `1500`) |
 | `VOICE_MIN_UTTERANCE_MS` | No | Minimum utterance length, skip noise (default: `500`) |
+| `VOICE_DEBUG` | No | Voice debug logging (default: on, set `0` to disable) |
+| `REFLECTION_MODEL` | No | Claude model for reflection analysis (default: same as `ANTHROPIC_MODEL`) |
 
 *Either `ANTHROPIC_API_KEY` or `ANTHROPIC_BASE_URL` + `ANTHROPIC_AUTH_TOKEN` required.
 
@@ -218,7 +220,7 @@ git merge upstream/main
 
 **Voice Messages** — Discord voice DMs and audio attachments are automatically detected and transcribed using OpenAI's Whisper API. The transcribed text is passed to the agent as the message content. Requires `OPENAI_API_KEY`. Gracefully degrades with a helpful message if the API key isn't configured. Supports OGG, MP3, WAV, M4A, WebM, FLAC, and other common audio formats.
 
-**Voice Assistant** — Real-time voice interaction in Discord voice channels. Pipeline: user speaks → opus decode → downsample to 16kHz mono → Silero VAD (ONNX, ~2MB model) detects speech boundaries → EigenAI Whisper V3 Turbo transcribes → Claude generates concise spoken response (1-3 sentences, no markdown) → EigenAI Chatterbox TTS synthesizes audio → bot speaks back. Voice model defaults to `claude-sonnet-4-20250514` (configurable via `VOICE_MODEL`), max 512 tokens (hardcoded). Supports interruptions (cuts off bot when user starts speaking), minimum utterance filtering (skips coughs/noise), and auto-disconnect after 10 minutes idle. Requires `EIGENAI_API_KEY`.
+**Voice Assistant** — Real-time voice interaction in Discord voice channels. Pipeline: user speaks → opus decode → downsample to 16kHz mono → Silero VAD (ONNX, ~2MB model) detects speech boundaries → EigenAI Whisper V3 Turbo transcribes → Claude generates concise spoken response (1-3 sentences, no markdown) → EigenAI Chatterbox TTS synthesizes audio → bot speaks back. Voice model defaults to `claude-sonnet-4-20250514` (configurable via `VOICE_MODEL`), max 1024 tokens (hardcoded). Supports interruptions (cuts off bot when user starts speaking), minimum utterance filtering (skips coughs/noise), and auto-disconnect after 10 minutes idle. Requires `EIGENAI_API_KEY`.
 
 **Evolution Engine** — The bot can modify its own source code through GitHub pull requests. All changes are isolated in a git worktree at `beta/`, typechecked, and submitted as PRs via `gh` CLI. The agent has 9 evolution tools: `evolve_start`, `evolve_read`, `evolve_write`, `evolve_bash`, `evolve_propose`, `evolve_suggest`, `evolve_cancel`, `evolve_review`, and `evolve_merge`. Users can review PR diffs and merge directly from Discord — merging automatically triggers a restart to deploy the changes and posts a deployment notification thread to a configured channel. The bot also records ideas for improvements it can't yet make (`evolve_suggest`). Evolution history is tracked in SQLite and viewable in the dashboard.
 
@@ -848,7 +850,7 @@ discordclaw/
 │   │   ├── vad.ts             # Silero VAD wrapper (ONNX runtime, v4 model)
 │   │   ├── stt.ts             # EigenAI Whisper V3 Turbo STT client
 │   │   ├── tts.ts             # EigenAI Chatterbox TTS client
-│   │   ├── agent.ts           # Voice-optimized Claude (default: Sonnet, configurable via VOICE_MODEL, 512 tokens, spoken style)
+│   │   ├── agent.ts           # Voice-optimized Claude (default: Sonnet, configurable via VOICE_MODEL, 1024 tokens, spoken style)
 │   │   └── index.ts           # Orchestrator: wires receive → VAD → STT → agent → TTS → play
 │   ├── skills/                # Skills management (SDK pattern)
 │   │   ├── types.ts           # Skill, SkillMeta, SkillSource types
