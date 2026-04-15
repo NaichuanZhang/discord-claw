@@ -4,6 +4,7 @@
 
 import { existsSync, statSync } from "fs";
 import { basename } from "path";
+import { registerBotThread } from "../bot/messages.js";
 
 export const discordTools = [
   {
@@ -131,6 +132,68 @@ const MAX_FILE_SIZE_BYTES = 25 * 1024 * 1024;
 const MAX_THREAD_NAME_LENGTH = 100;
 
 // ---------------------------------------------------------------------------
+// Channel type constants (discord.js ChannelType enum values)
+// ---------------------------------------------------------------------------
+
+/** ChannelType.GuildText = 0 */
+const GUILD_TEXT = 0;
+/** ChannelType.GuildAnnouncement = 5 */
+const GUILD_ANNOUNCEMENT = 5;
+
+/**
+ * Check if a channel is a guild text channel (not a thread, not a DM).
+ * These channels require messages to be sent inside threads.
+ */
+function isGuildTextChannel(channel: any): boolean {
+  return channel.type === GUILD_TEXT || channel.type === GUILD_ANNOUNCEMENT;
+}
+
+/**
+ * Create a thread in a guild text channel for bot messages.
+ * Returns the thread channel to send messages in.
+ */
+async function getOrCreateThread(
+  channel: any,
+  threadName: string,
+): Promise<any> {
+  const name = threadName.slice(0, MAX_THREAD_NAME_LENGTH);
+  console.log(
+    `[agent] Auto-creating thread "${name}" in channel ${channel.id} (enforcing thread-only policy)`,
+  );
+
+  const thread = await channel.threads.create({
+    name,
+    // ChannelType.PublicThread = 11
+    type: 11,
+  });
+
+  // Register as bot-created thread so bot responds without @mentions
+  registerBotThread(thread.id);
+
+  return thread;
+}
+
+/**
+ * Generate a short thread name from message text.
+ */
+function generateThreadNameFromText(text: string): string {
+  // Take the first line, trimmed
+  let name = text.split("\n")[0].trim();
+
+  // If too short or empty, use a generic name
+  if (!name || name.length < 3) {
+    name = "Bot message";
+  }
+
+  // Truncate with ellipsis
+  if (name.length > MAX_THREAD_NAME_LENGTH - 1) {
+    name = name.slice(0, MAX_THREAD_NAME_LENGTH - 1) + "…";
+  }
+
+  return name;
+}
+
+// ---------------------------------------------------------------------------
 // Tool handler
 // ---------------------------------------------------------------------------
 
@@ -154,11 +217,22 @@ export async function handleDiscordTool(
             error: `Channel ${channelId} not found or not a text channel`,
           });
         }
-        const sent = await channel.send(text);
+
+        // If targeting a guild text channel, auto-create a thread
+        let sendTarget = channel;
+        let threadId: string | undefined;
+        if (isGuildTextChannel(channel)) {
+          const threadName = generateThreadNameFromText(text);
+          sendTarget = await getOrCreateThread(channel, threadName);
+          threadId = sendTarget.id;
+        }
+
+        const sent = await sendTarget.send(text);
         return JSON.stringify({
           success: true,
           message_id: sent.id,
-          channel_id: channelId,
+          channel_id: threadId ?? channelId,
+          ...(threadId ? { thread_id: threadId, parent_channel_id: channelId } : {}),
         });
       }
 
@@ -194,6 +268,17 @@ export async function handleDiscordTool(
           });
         }
 
+        // If targeting a guild text channel, auto-create a thread
+        let sendTarget = channel;
+        let threadId: string | undefined;
+        if (isGuildTextChannel(channel)) {
+          const threadName = customFilename
+            ? `📎 ${customFilename}`
+            : `📎 ${basename(filePath)}`;
+          sendTarget = await getOrCreateThread(channel, threadName);
+          threadId = sendTarget.id;
+        }
+
         const attachment: { attachment: string; name?: string } = {
           attachment: filePath,
         };
@@ -208,13 +293,14 @@ export async function handleDiscordTool(
           sendPayload.content = message;
         }
 
-        const sent = await channel.send(sendPayload);
+        const sent = await sendTarget.send(sendPayload);
         const sentAttachment = sent.attachments?.first();
 
         return JSON.stringify({
           success: true,
           message_id: sent.id,
-          channel_id: channelId,
+          channel_id: threadId ?? channelId,
+          ...(threadId ? { thread_id: threadId, parent_channel_id: channelId } : {}),
           filename: sentAttachment?.name ?? customFilename ?? basename(filePath),
           size_bytes: stats.size,
         });
@@ -289,6 +375,9 @@ export async function handleDiscordTool(
           // ChannelType.PublicThread = 11
           type: 11,
         });
+
+        // Register as bot-created thread
+        registerBotThread(thread.id);
 
         // Send initial message if provided
         if (initialMessage) {

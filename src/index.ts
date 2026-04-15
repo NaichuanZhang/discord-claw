@@ -23,9 +23,46 @@ import {
 } from "./reflection/daemon.js";
 import { initVoice, setVoiceDiscordClient, destroyVoice } from "./voice/index.js";
 import { enableAutoJoin, disableAutoJoin } from "./voice/autoJoin.js";
+import { registerBotThread } from "./bot/messages.js";
 
 // Admin user ID for DM fallback delivery
 const ADMIN_USER_ID = "152801068663832576";
+
+// ---------------------------------------------------------------------------
+// Channel type helpers for thread-only policy
+// ---------------------------------------------------------------------------
+
+/** ChannelType.GuildText = 0, ChannelType.GuildAnnouncement = 5 */
+function isGuildTextChannel(channel: any): boolean {
+  return channel.type === 0 || channel.type === 5;
+}
+
+/**
+ * Ensure messages sent to guild text channels go into a thread.
+ * Creates a new thread and returns it, or returns the original channel
+ * if it's already a thread/DM/voice channel.
+ */
+async function ensureThread(
+  channel: any,
+  threadName: string,
+  source: string,
+): Promise<any> {
+  if (!isGuildTextChannel(channel)) return channel;
+
+  const name = threadName.slice(0, 100);
+  console.log(
+    `[${source}] Auto-creating thread "${name}" in channel ${channel.id} (enforcing thread-only policy)`,
+  );
+
+  const thread = await channel.threads.create({
+    name,
+    // ChannelType.PublicThread = 11
+    type: 11,
+  });
+
+  registerBotThread(thread.id);
+  return thread;
+}
 
 // ---------------------------------------------------------------------------
 // Startup
@@ -98,7 +135,13 @@ async function main(): Promise<void> {
       return;
     }
     const prefix = mentionUser ? `<@${mentionUser}> ` : "";
-    await channel.send(prefix + text);
+    const fullText = prefix + text;
+    const target = await ensureThread(
+      channel,
+      fullText.split("\n")[0].slice(0, 100) || "Cron notification",
+      "cron",
+    );
+    await target.send(fullText);
   });
 
   // Wire cron → admin DM fallback
@@ -118,7 +161,12 @@ async function main(): Promise<void> {
       console.error(`[evolution] Cannot send to channel ${channelId}`);
       return;
     }
-    await channel.send(text);
+    const target = await ensureThread(
+      channel,
+      text.split("\n")[0].slice(0, 100) || "Evolution update",
+      "evolution",
+    );
+    await target.send(text);
   });
 
   // Wire evolution → Discord thread creation (for deployment notifications)
@@ -133,6 +181,7 @@ async function main(): Promise<void> {
       // ChannelType.PublicThread = 11
       type: 11,
     });
+    registerBotThread(thread.id);
     if (message) {
       await thread.send(message);
     }
@@ -148,7 +197,12 @@ async function main(): Promise<void> {
         console.error(`[reflection] Cannot send to channel ${channelId}`);
         return;
       }
-      await channel.send(text);
+      const target = await ensureThread(
+        channel,
+        text.split("\n")[0].slice(0, 100) || "Reflection",
+        "reflection",
+      );
+      await target.send(text);
     });
   }
 

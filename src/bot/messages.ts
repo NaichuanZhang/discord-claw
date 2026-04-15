@@ -45,6 +45,14 @@ export function setMessageClient(client: Client): void {
  */
 const botCreatedThreads = new Set<string>();
 
+/**
+ * Register a thread ID as bot-created, so the bot responds to all
+ * messages in it without requiring @mentions.
+ */
+export function registerBotThread(threadId: string): void {
+  botCreatedThreads.add(threadId);
+}
+
 // ---------------------------------------------------------------------------
 // Message splitting helper
 // ---------------------------------------------------------------------------
