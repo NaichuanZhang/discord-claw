@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
 import { nanoid } from "nanoid";
+import { DATA_DIR } from "../shared/paths.js";
 import type {
   CronJob,
   CronJobCreate,
@@ -10,12 +10,9 @@ import type {
   CronStoreData,
 } from "./types.js";
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const PROJECT_ROOT = path.resolve(__dirname, "..", "..");
-
-const JOBS_PATH = path.join(PROJECT_ROOT, "data", "cron", "jobs.json");
+const JOBS_PATH = path.join(DATA_DIR, "cron", "jobs.json");
 const JOBS_TMP_PATH = JOBS_PATH + ".tmp";
-const RUNS_DIR = path.join(PROJECT_ROOT, "data", "cron", "runs");
+const RUNS_DIR = path.join(DATA_DIR, "cron", "runs");
 
 function log(...args: unknown[]): void {
   console.log("[cron-store]", ...args);

@@ -1,11 +1,9 @@
 import { watch, type FSWatcher } from "node:fs";
 import { readFile, writeFile, mkdir } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { DATA_DIR } from "../shared/paths.js";
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const PROJECT_ROOT = join(__dirname, "..", "..");
-const SOUL_PATH = join(PROJECT_ROOT, "data", "SOUL.md");
+const SOUL_PATH = join(DATA_DIR, "SOUL.md");
 
 const DEFAULT_SOUL = `# Soul
 You are a helpful AI assistant on Discord.

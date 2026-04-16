@@ -5,8 +5,8 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { existsSync, symlinkSync, rmSync } from "node:fs";
-import { join, dirname } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
+import { PROJECT_ROOT, BETA_DIR } from "../shared/paths.js";
 import { triggerRestart } from "../restart.js";
 import {
   createEvolution,
@@ -18,11 +18,6 @@ import {
 } from "./log.js";
 
 const execFileAsync = promisify(execFile);
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
-const PROJECT_ROOT = join(__dirname, "..", "..");
-const BETA_DIR = join(PROJECT_ROOT, "beta");
 
 const GIT_TIMEOUT = 30_000;
 const GH_TIMEOUT = 30_000;

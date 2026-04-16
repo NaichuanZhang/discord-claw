@@ -1,10 +1,10 @@
 import fs from "node:fs";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { mkdtemp, rm, cp, readFile } from "node:fs/promises";
+import { mkdtemp, rm, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
+import { SKILLS_DIR } from "../shared/paths.js";
 import { SkillStore } from "./store.js";
 import type {
   Skill,
@@ -18,11 +18,6 @@ import type {
 } from "./types.js";
 
 const execFileAsync = promisify(execFile);
-
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const PROJECT_ROOT = path.resolve(__dirname, "..", "..");
-const SKILLS_DIR = path.join(PROJECT_ROOT, "data", "skills");
-const MAX_SKILLS_PROMPT_CHARS = 8000;
 
 // ---------------------------------------------------------------------------
 // Module-level singleton accessor (for agent.ts to import)

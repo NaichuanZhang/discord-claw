@@ -1,16 +1,13 @@
 import { watch, existsSync, statSync, readFileSync, type FSWatcher } from "node:fs";
 import { readFile, readdir, mkdir } from "node:fs/promises";
-import { dirname, join, relative, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join, relative, resolve } from "node:path";
+import { DATA_DIR } from "../shared/paths.js";
 import { getDb } from "../db/index.js";
 
 // ---------------------------------------------------------------------------
 // Paths
 // ---------------------------------------------------------------------------
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const PROJECT_ROOT = join(__dirname, "..", "..");
-const DATA_DIR = join(PROJECT_ROOT, "data");
 const MEMORY_FILE = join(DATA_DIR, "MEMORY.md");
 const MEMORY_DIR = join(DATA_DIR, "memory");
 

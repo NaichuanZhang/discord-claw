@@ -4,11 +4,7 @@
 
 import fs from "node:fs";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
-
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const PROJECT_ROOT = path.resolve(__dirname, "..", "..");
-const SKILLS_DIR = path.join(PROJECT_ROOT, "data", "skills");
+import { SKILLS_DIR } from "../shared/paths.js";
 
 export const skillTools = [
   {

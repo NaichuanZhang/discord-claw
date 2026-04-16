@@ -1,7 +1,7 @@
 import Database from "better-sqlite3";
 import { existsSync, mkdirSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
+import { DATA_DIR } from "../shared/paths.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -58,14 +58,10 @@ export interface ChannelConfig {
 }
 
 // ---------------------------------------------------------------------------
-// Database path — resolve relative to project root
+// Database path
 // ---------------------------------------------------------------------------
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
-const PROJECT_ROOT = join(__dirname, "..", ".."); // src/db -> src -> root
-const DB_DIR = join(PROJECT_ROOT, "data");
-const DB_PATH = join(DB_DIR, "discordclaw.db");
+const DB_PATH = join(DATA_DIR, "discordclaw.db");
 
 // ---------------------------------------------------------------------------
 // Singleton
@@ -75,8 +71,8 @@ let db: Database.Database | null = null;
 
 export function getDb(): Database.Database {
   if (!db) {
-    if (!existsSync(DB_DIR)) {
-      mkdirSync(DB_DIR, { recursive: true });
+    if (!existsSync(DATA_DIR)) {
+      mkdirSync(DATA_DIR, { recursive: true });
     }
     db = new Database(DB_PATH);
     db.pragma("journal_mode = WAL");

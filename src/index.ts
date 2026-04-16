@@ -22,45 +22,10 @@ import {
 import { initVoice, setVoiceDiscordClient, destroyVoice } from "./voice/index.js";
 import { enableAutoJoin, disableAutoJoin } from "./voice/autoJoin.js";
 import { registerBotThread } from "./bot/messages.js";
+import { ensureThread } from "./shared/discord-utils.js";
 
 // Admin user ID for DM fallback delivery
 const ADMIN_USER_ID = "152801068663832576";
-
-// ---------------------------------------------------------------------------
-// Channel type helpers for thread-only policy
-// ---------------------------------------------------------------------------
-
-/** ChannelType.GuildText = 0, ChannelType.GuildAnnouncement = 5 */
-function isGuildTextChannel(channel: any): boolean {
-  return channel.type === 0 || channel.type === 5;
-}
-
-/**
- * Ensure messages sent to guild text channels go into a thread.
- * Creates a new thread and returns it, or returns the original channel
- * if it's already a thread/DM/voice channel.
- */
-async function ensureThread(
-  channel: any,
-  threadName: string,
-  source: string,
-): Promise<any> {
-  if (!isGuildTextChannel(channel)) return channel;
-
-  const name = threadName.slice(0, 100);
-  console.log(
-    `[${source}] Auto-creating thread "${name}" in channel ${channel.id} (enforcing thread-only policy)`,
-  );
-
-  const thread = await channel.threads.create({
-    name,
-    // ChannelType.PublicThread = 11
-    type: 11,
-  });
-
-  registerBotThread(thread.id);
-  return thread;
-}
 
 // ---------------------------------------------------------------------------
 // Startup

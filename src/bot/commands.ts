@@ -9,7 +9,6 @@ import { clearSession, resolveSession } from "../agent/sessions.js";
 import { getChannelConfig, setChannelConfig, getDb } from "../db/index.js";
 import { getSoul } from "../soul/soul.js";
 import { triggerRestart } from "../restart.js";
-import { handleComponentInteraction } from "./components.js";
 import { startVoice, stopVoice, isConnected } from "../voice/index.js";
 import type { SkillService } from "../skills/service.js";
 import type { CronService } from "../cron/service.js";
@@ -299,9 +298,9 @@ export const slashCommands: ApplicationCommandData[] = [
 // ---------------------------------------------------------------------------
 
 export async function handleInteraction(interaction: Interaction): Promise<void> {
-  // Handle button / select menu interactions
+  // Handle button / select menu interactions (placeholder — extend as needed)
   if (interaction.isButton() || interaction.isStringSelectMenu()) {
-    await handleComponentInteraction(interaction);
+    await interaction.reply({ content: "Interaction received.", ephemeral: true });
     return;
   }
 
@@ -851,9 +850,6 @@ function formatPayload(payload: CronPayload): string {
 
 /**
  * Parse a schedule string from the user into a CronSchedule.
- * Accepts:
- *   - "every 30m", "every 2h", "every 1d", "every 90s"
- *   - standard cron expressions like "0 9 * * *"
  */
 function parseScheduleInput(input: string, tz?: string): CronSchedule {
   const everyMatch = input.match(/^every\s+(\d+)\s*(s|sec|second|seconds|m|min|minute|minutes|h|hr|hour|hours|d|day|days)$/i);
@@ -886,9 +882,6 @@ async function handleCron(
   const subcommand = interaction.options.getSubcommand();
 
   switch (subcommand) {
-    // -----------------------------------------------------------------------
-    // /cron list
-    // -----------------------------------------------------------------------
     case "list": {
       const jobs = cronService.list();
 
@@ -919,9 +912,6 @@ async function handleCron(
       break;
     }
 
-    // -----------------------------------------------------------------------
-    // /cron show <id>
-    // -----------------------------------------------------------------------
     case "show": {
       const id = interaction.options.getString("id", true);
       const job = cronService.get(id);
@@ -939,9 +929,6 @@ async function handleCron(
       break;
     }
 
-    // -----------------------------------------------------------------------
-    // /cron add
-    // -----------------------------------------------------------------------
     case "add": {
       const name = interaction.options.getString("name", true);
       const scheduleInput = interaction.options.getString("schedule", true);
@@ -988,9 +975,6 @@ async function handleCron(
       break;
     }
 
-    // -----------------------------------------------------------------------
-    // /cron remove <id>
-    // -----------------------------------------------------------------------
     case "remove": {
       const id = interaction.options.getString("id", true);
       const job = cronService.get(id);
@@ -1016,9 +1000,6 @@ async function handleCron(
       break;
     }
 
-    // -----------------------------------------------------------------------
-    // /cron enable <id>
-    // -----------------------------------------------------------------------
     case "enable": {
       const id = interaction.options.getString("id", true);
       const job = cronService.update(id, { enabled: true });
@@ -1043,9 +1024,6 @@ async function handleCron(
       break;
     }
 
-    // -----------------------------------------------------------------------
-    // /cron disable <id>
-    // -----------------------------------------------------------------------
     case "disable": {
       const id = interaction.options.getString("id", true);
       const job = cronService.update(id, { enabled: false });
@@ -1066,9 +1044,6 @@ async function handleCron(
       break;
     }
 
-    // -----------------------------------------------------------------------
-    // /cron run <id>
-    // -----------------------------------------------------------------------
     case "run": {
       const id = interaction.options.getString("id", true);
       const job = cronService.get(id);
@@ -1097,9 +1072,6 @@ async function handleCron(
       break;
     }
 
-    // -----------------------------------------------------------------------
-    // /cron history <id>
-    // -----------------------------------------------------------------------
     case "history": {
       const id = interaction.options.getString("id", true);
       const limit = interaction.options.getInteger("limit") ?? 10;

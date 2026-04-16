@@ -7,6 +7,7 @@
 // ---------------------------------------------------------------------------
 
 import Anthropic from "@anthropic-ai/sdk";
+import { anthropicClient } from "../shared/anthropic.js";
 import { getDb } from "../db/index.js";
 import {
   getSignalsSince,
@@ -47,15 +48,6 @@ const REFLECTION_MODEL = process.env.REFLECTION_MODEL || process.env.ANTHROPIC_M
 function log(...args: unknown[]): void {
   console.log("[reflection]", ...args);
 }
-
-// ---------------------------------------------------------------------------
-// Anthropic client (reuse the same config as the main agent)
-// ---------------------------------------------------------------------------
-
-const client = new Anthropic({
-  baseURL: process.env.ANTHROPIC_BASE_URL || undefined,
-  apiKey: process.env.ANTHROPIC_AUTH_TOKEN || process.env.ANTHROPIC_API_KEY,
-});
 
 // ---------------------------------------------------------------------------
 // Discord notification callback
@@ -230,7 +222,7 @@ async function runReflection(): Promise<ReflectionResult> {
     // 2. Build prompt and call Claude
     const prompt = buildReflectionPrompt(ctx);
 
-    const response = await client.messages.create({
+    const response = await anthropicClient.messages.create({
       model: REFLECTION_MODEL,
       max_tokens: 2048,
       messages: [{ role: "user", content: prompt }],

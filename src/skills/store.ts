@@ -1,13 +1,9 @@
 import fs from "node:fs";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
 import { nanoid } from "nanoid";
+import { SKILLS_DIR } from "../shared/paths.js";
 import type { SkillMeta, SkillSource } from "./types.js";
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const PROJECT_ROOT = path.resolve(__dirname, "..", "..");
-
-const SKILLS_DIR = path.join(PROJECT_ROOT, "data", "skills");
 const MAX_SKILL_SIZE = 256 * 1024; // 256 KB
 
 function log(...args: unknown[]): void {

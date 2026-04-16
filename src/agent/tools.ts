@@ -5,6 +5,12 @@
 import { existsSync, statSync } from "fs";
 import { basename } from "path";
 import { registerBotThread } from "../bot/messages.js";
+import {
+  isGuildTextChannel,
+  ensureThread,
+  generateThreadName,
+  MAX_THREAD_NAME_LENGTH,
+} from "../shared/discord-utils.js";
 
 export const discordTools = [
   {
@@ -128,71 +134,6 @@ export function setDiscordClient(client: any): void {
 /** Discord's max file upload size for bots (default tier: 25 MB). */
 const MAX_FILE_SIZE_BYTES = 25 * 1024 * 1024;
 
-/** Discord's max thread name length. */
-const MAX_THREAD_NAME_LENGTH = 100;
-
-// ---------------------------------------------------------------------------
-// Channel type constants (discord.js ChannelType enum values)
-// ---------------------------------------------------------------------------
-
-/** ChannelType.GuildText = 0 */
-const GUILD_TEXT = 0;
-/** ChannelType.GuildAnnouncement = 5 */
-const GUILD_ANNOUNCEMENT = 5;
-
-/**
- * Check if a channel is a guild text channel (not a thread, not a DM).
- * These channels require messages to be sent inside threads.
- */
-function isGuildTextChannel(channel: any): boolean {
-  return channel.type === GUILD_TEXT || channel.type === GUILD_ANNOUNCEMENT;
-}
-
-/**
- * Create a thread in a guild text channel for bot messages.
- * Returns the thread channel to send messages in.
- */
-async function getOrCreateThread(
-  channel: any,
-  threadName: string,
-): Promise<any> {
-  const name = threadName.slice(0, MAX_THREAD_NAME_LENGTH);
-  console.log(
-    `[agent] Auto-creating thread "${name}" in channel ${channel.id} (enforcing thread-only policy)`,
-  );
-
-  const thread = await channel.threads.create({
-    name,
-    // ChannelType.PublicThread = 11
-    type: 11,
-  });
-
-  // Register as bot-created thread so bot responds without @mentions
-  registerBotThread(thread.id);
-
-  return thread;
-}
-
-/**
- * Generate a short thread name from message text.
- */
-function generateThreadNameFromText(text: string): string {
-  // Take the first line, trimmed
-  let name = text.split("\n")[0].trim();
-
-  // If too short or empty, use a generic name
-  if (!name || name.length < 3) {
-    name = "Bot message";
-  }
-
-  // Truncate with ellipsis
-  if (name.length > MAX_THREAD_NAME_LENGTH - 1) {
-    name = name.slice(0, MAX_THREAD_NAME_LENGTH - 1) + "…";
-  }
-
-  return name;
-}
-
 // ---------------------------------------------------------------------------
 // Tool handler
 // ---------------------------------------------------------------------------
@@ -222,8 +163,8 @@ export async function handleDiscordTool(
         let sendTarget = channel;
         let threadId: string | undefined;
         if (isGuildTextChannel(channel)) {
-          const threadName = generateThreadNameFromText(text);
-          sendTarget = await getOrCreateThread(channel, threadName);
+          const threadName = generateThreadName(text);
+          sendTarget = await ensureThread(channel, threadName, "agent");
           threadId = sendTarget.id;
         }
 
@@ -275,7 +216,7 @@ export async function handleDiscordTool(
           const threadName = customFilename
             ? `📎 ${customFilename}`
             : `📎 ${basename(filePath)}`;
-          sendTarget = await getOrCreateThread(channel, threadName);
+          sendTarget = await ensureThread(channel, threadName, "agent");
           threadId = sendTarget.id;
         }
 

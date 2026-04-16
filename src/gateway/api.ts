@@ -2,7 +2,7 @@ import { Router, type Request, type Response } from "express";
 import { existsSync, statSync, readdirSync } from "node:fs";
 import { writeFile, mkdir } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { DATA_DIR } from "../shared/paths.js";
 
 import { getDb, getSessionMessages, setChannelConfig, setConfig } from "../db/index.js";
 import { listSessions, clearSession } from "../agent/sessions.js";
@@ -19,10 +19,6 @@ import {
   getIdeas,
   updateEvolution,
 } from "../evolution/log.js";
-
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const PROJECT_ROOT = join(__dirname, "..", "..");
-const DATA_DIR = join(PROJECT_ROOT, "data");
 
 // ---------------------------------------------------------------------------
 // Helpers

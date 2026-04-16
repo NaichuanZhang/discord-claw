@@ -12,22 +12,14 @@
  */
 
 import Anthropic from "@anthropic-ai/sdk";
+import { anthropicClient } from "../shared/anthropic.js";
+import { conversationHistoryTools, handleConversationHistoryTool } from "../shared/conversation-history.js";
 import { getSoul } from "../soul/soul.js";
 import { memoryTools, handleMemoryTool } from "../memory/tools.js";
 import { discordTools, handleDiscordTool } from "../agent/tools.js";
 import { skillTools, handleSkillTool } from "../skills/tools.js";
 import { dangerousTools, handleDangerousTool } from "../agent/dangerous-tools.js";
-import { getRecentMessages, getConversationStats } from "../db/index.js";
 import { getSkillService } from "../skills/service.js";
-
-// ---------------------------------------------------------------------------
-// Anthropic client (singleton)
-// ---------------------------------------------------------------------------
-
-const client = new Anthropic({
-  baseURL: process.env.ANTHROPIC_BASE_URL || undefined,
-  apiKey: process.env.ANTHROPIC_AUTH_TOKEN || process.env.ANTHROPIC_API_KEY,
-});
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -60,101 +52,6 @@ CRITICAL RULES FOR VOICE RESPONSES:
 - Numbers should be spoken form (say "about three thousand" not "3,000").
 
 You have access to the full set of tools: memory, Discord, bash, file I/O, and skills. Use them when needed, but keep your spoken responses brief.`;
-
-// ---------------------------------------------------------------------------
-// Conversation history tools (same as main agent)
-// ---------------------------------------------------------------------------
-
-const conversationHistoryTools: Anthropic.Messages.Tool[] = [
-  {
-    name: "get_conversation_history",
-    description:
-      "Get recent conversation messages from the database, spanning across all sessions (including archived ones). " +
-      "Use this to review what conversations happened recently. Returns messages newest-first.",
-    input_schema: {
-      type: "object" as const,
-      properties: {
-        hours: {
-          type: "number",
-          description: "How many hours back to look (default: 24)",
-        },
-        limit: {
-          type: "number",
-          description: "Max messages to return (default: 100, max: 500)",
-        },
-        role: {
-          type: "string",
-          description: "Filter by role: 'user' or 'assistant' (default: both)",
-        },
-      },
-      required: [],
-    },
-  },
-  {
-    name: "get_conversation_stats",
-    description:
-      "Get statistics about recent conversations: total sessions, messages, unique users, etc.",
-    input_schema: {
-      type: "object" as const,
-      properties: {
-        hours: {
-          type: "number",
-          description: "How many hours back to look (default: 24)",
-        },
-      },
-      required: [],
-    },
-  },
-];
-
-function handleConversationHistoryTool(
-  name: string,
-  input: Record<string, unknown>,
-): string {
-  try {
-    switch (name) {
-      case "get_conversation_history": {
-        const hours = (input.hours as number) || 24;
-        const limit = Math.min((input.limit as number) || 100, 500);
-        const role = input.role as string | undefined;
-
-        const messages = getRecentMessages({
-          sinceMs: hours * 60 * 60 * 1000,
-          limit,
-          role,
-        });
-
-        const formatted = messages.map((m) => ({
-          role: m.role,
-          content: m.content.slice(0, 500),
-          channel: m.discordKey || m.channelId || "unknown",
-          userId: m.userId,
-          timestamp: new Date(m.createdAt).toISOString(),
-          hasMore: m.content.length > 500,
-        }));
-
-        return JSON.stringify({
-          count: formatted.length,
-          hours_back: hours,
-          messages: formatted,
-        });
-      }
-
-      case "get_conversation_stats": {
-        const hours = (input.hours as number) || 24;
-        const stats = getConversationStats(hours * 60 * 60 * 1000);
-        return JSON.stringify(stats);
-      }
-
-      default:
-        return JSON.stringify({ error: `Unknown tool: ${name}` });
-    }
-  } catch (err) {
-    return JSON.stringify({
-      error: err instanceof Error ? err.message : String(err),
-    });
-  }
-}
 
 // ---------------------------------------------------------------------------
 // Voice tools — everything except evolution
@@ -350,7 +247,7 @@ export async function processVoiceUtteranceStreaming(
   while (continueLoop) {
     if (signal?.aborted) break;
 
-    const stream = client.messages.stream({
+    const stream = anthropicClient.messages.stream({
       model: getVoiceModel(),
       max_tokens: VOICE_MAX_TOKENS,
       system: systemPrompt,
@@ -463,7 +360,7 @@ export async function processVoiceUtterance(
   const collectedText: string[] = [];
 
   console.log(`[voice-agent] Calling Claude (${messages.length} messages)...`);
-  let response = await client.messages.create({
+  let response = await anthropicClient.messages.create({
     model: getVoiceModel(),
     max_tokens: VOICE_MAX_TOKENS,
     system: systemPrompt,
@@ -513,7 +410,7 @@ export async function processVoiceUtterance(
 
     // Follow-up call
     console.log(`[voice-agent] Follow-up Claude call after tool round ${toolRound}...`);
-    response = await client.messages.create({
+    response = await anthropicClient.messages.create({
       model: getVoiceModel(),
       max_tokens: VOICE_MAX_TOKENS,
       system: systemPrompt,

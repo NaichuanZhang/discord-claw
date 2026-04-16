@@ -1,14 +1,12 @@
 import express from "express";
 import { createServer } from "node:http";
 import { WebSocketServer, WebSocket } from "ws";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 import { existsSync } from "node:fs";
+import { PROJECT_ROOT } from "../shared/paths.js";
 import { createApiRouter } from "./api.js";
 import type { CronService } from "../cron/service.js";
 import type { SkillService } from "../skills/service.js";
-
-const __dirname = dirname(fileURLToPath(import.meta.url));
 
 // ---------------------------------------------------------------------------
 // WebSocket client tracking
@@ -56,7 +54,7 @@ export function startGateway(opts: {
   app.use("/api", apiRouter);
 
   // ---------- Static files for dashboard SPA ----------
-  const uiDistPath = join(__dirname, "..", "..", "dist", "ui");
+  const uiDistPath = join(PROJECT_ROOT, "dist", "ui");
   if (existsSync(uiDistPath)) {
     app.use(express.static(uiDistPath));
 
