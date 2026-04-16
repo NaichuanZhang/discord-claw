@@ -117,7 +117,7 @@ ANTHROPIC_API_KEY=your_anthropic_api_key
 OPENAI_API_KEY=your_openai_key          # Voice message transcription
 GATEWAY_PORT=3000                        # Dashboard port
 GATEWAY_TOKEN=your_secret_token          # Dashboard auth token
-ANTHROPIC_MODEL=bedrock-claude-opus-4-6-1m # Model override (this is the default)
+ANTHROPIC_MODEL=bedrock-claude-opus-4-7-1m # Model override (this is the default)
 ```
 
 ### 4. Install & Run
@@ -176,7 +176,7 @@ git merge upstream/main
 | `ANTHROPIC_API_KEY` | Yes* | Anthropic API key |
 | `ANTHROPIC_BASE_URL` | No | Proxy URL (overrides default API endpoint) |
 | `ANTHROPIC_AUTH_TOKEN` | No | Auth token for proxy (used instead of API key) |
-| `ANTHROPIC_MODEL` | No | Model name (default: `bedrock-claude-opus-4-6-1m`) |
+| `ANTHROPIC_MODEL` | No | Model name (default: `bedrock-claude-opus-4-7-1m`) |
 | `OPENAI_API_KEY` | No | OpenAI API key for voice message transcription (Whisper) |
 | `GATEWAY_PORT` | No | Dashboard port (default: `3000`) |
 | `GATEWAY_TOKEN` | No | Auth token for dashboard API access |
