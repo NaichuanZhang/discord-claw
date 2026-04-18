@@ -109,9 +109,9 @@ async function executeVoiceTool(
   name: string,
   input: Record<string, unknown>,
 ): Promise<string> {
-  // Memory tools (sync)
-  if (name === "memory_search" || name === "memory_get") {
-    return handleMemoryTool(name, input);
+  // Memory tools (now async due to mem9 integration)
+  if (name === "memory_search" || name === "memory_get" || name === "memory_store") {
+    return await handleMemoryTool(name, input);
   }
   // Discord tools (async)
   if (

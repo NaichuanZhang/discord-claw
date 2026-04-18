@@ -3,6 +3,7 @@ import "dotenv/config";
 import { initDb } from "./db/index.js";
 import { initSoul, stopSoulWatcher } from "./soul/soul.js";
 import { initMemory, stopMemoryWatcher } from "./memory/memory.js";
+import { mem9Enabled } from "./memory/mem9.js";
 import { CronService } from "./cron/service.js";
 import { SkillService } from "./skills/service.js";
 import { processAgentTurn } from "./agent/agent.js";
@@ -213,6 +214,7 @@ async function main(): Promise<void> {
   // 9. Log startup summary
   const guilds = client.guilds.cache;
   const cronJobs = cronService.list();
+  const mem9Ready = mem9Enabled();
   console.log("[discordclaw] ========================================");
   console.log(`[discordclaw] Bot online as ${client.user?.tag}`);
   console.log(`[discordclaw] Guilds: ${guilds.size}`);
@@ -220,6 +222,7 @@ async function main(): Promise<void> {
   console.log(`[discordclaw] Skills: ${skillService.list().length}`);
   console.log(`[discordclaw] gh CLI: ${ghAvailable ? "ready" : "NOT AVAILABLE"}`);
   console.log(`[discordclaw] Voice: ${voiceReady ? "ready (auto-join enabled)" : "NOT AVAILABLE"}`);
+  console.log(`[discordclaw] mem9: ${mem9Ready ? "ready (cloud memory enabled)" : "not configured"}`);
   console.log(`[discordclaw] Reflection: ${reflectionChannelId ? `→ #${reflectionChannelId}` : "no channel (ideas only)"}`);
   console.log(`[discordclaw] Gateway: http://localhost:${port}`);
   console.log("[discordclaw] ========================================");

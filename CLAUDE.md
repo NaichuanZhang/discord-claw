@@ -46,11 +46,11 @@ Key constants in `agent/agent.ts`: `DEFAULT_MODEL = "bedrock-claude-opus-4-6-1m"
 Tools are defined across multiple files and registered in `agent/agent.ts`:
 
 | File | Tools | Purpose |
-|------|-------|---------
+|------|-------|---------|
 | `agent/tools.ts` | send_message, send_file, add_reaction, get_channel_history, create_thread | Discord channel operations |
 | `agent/dangerous-tools.ts` | bash, read_file, write_file | System access |
 | `agent/agent.ts` | get_conversation_history, get_conversation_stats | Cross-session conversation replay |
-| `memory/tools.ts` | memory_search, memory_get | BM25 FTS5 knowledge search |
+| `memory/tools.ts` | memory_search, memory_get, memory_store | BM25 FTS5 knowledge search + mem9 cloud memory |
 | `skills/tools.ts` | read_skill, list_skill_files | Progressive skill loading |
 | `evolution/tools.ts` | evolve_start, evolve_read, evolve_write, evolve_bash, evolve_propose, evolve_suggest, evolve_cancel, evolve_review, evolve_merge | Self-modification via PRs |
 
@@ -73,7 +73,7 @@ Sessions are keyed by thread/channel/user/DM combination. `agent/sessions.ts` re
 ### Soul, Memory, and Skills
 
 - **Soul**: Bot personality loaded from `data/SOUL.md` with filesystem watcher for hot-reload. Injected into every system prompt.
-- **Memory**: Markdown files in `data/` and `data/memory/` are chunked and indexed into SQLite FTS5. BM25-ranked full-text search.
+- **Memory**: Dual-layer memory system. Local layer: Markdown files in `data/` and `data/memory/` are chunked and indexed into SQLite FTS5 (BM25-ranked full-text search). Cloud layer: mem9 API (`src/memory/mem9.ts`) provides semantic cloud memory via `https://api.mem9.ai`. When configured (`MEM9_API_KEY` + `MEM9_ORG_ID`), `memory_search` queries both local FTS5 and mem9, merging results. `memory_store` writes to mem9 cloud. Falls back gracefully to local-only when mem9 is not configured.
 - **Skills**: SKILL.md files with YAML frontmatter in `data/skills/`. Progressive loading — only metadata in system prompt; full content via `read_skill` tool. Installable from GitHub URLs.
 
 ### Cron Service
@@ -127,6 +127,7 @@ Shell scripts in `migrations/` run by `start.sh` before build. All idempotent (`
 - **Signal collection is passive and non-blocking**: `recordSignal()` never throws — errors during recording are caught and logged.
 - **Token usage**: Aggregated across all API calls within a single user→response turn (including tool-use loops). Costs computed at query time (not stored) so pricing can be updated without migration.
 - **Production deployment**: `start.sh` runs: kill existing → git pull → npm ci (if lockfile changed) → migrations → seed cron → build → start → health check (30s timeout) → auto-rollback on failure. Discord webhook notifications on success/failure.
+- **Memory dual-layer**: When `MEM9_API_KEY` and `MEM9_ORG_ID` are set, memory tools operate in dual mode — searching both local FTS5 and mem9 cloud, and enabling `memory_store` for cloud persistence. When not configured, gracefully falls back to local-only. The `handleMemoryTool` function is async to support mem9 API calls.
 
 ## Skill vs Code Decision Guide
 
@@ -140,4 +141,4 @@ Skills are preferred over code when possible: they're cheaper, safer, instantly 
 
 ## Environment
 
-Requires either `ANTHROPIC_API_KEY` or `ANTHROPIC_BASE_URL` + `ANTHROPIC_AUTH_TOKEN` (for proxy). `DISCORD_BOT_TOKEN` is always required. `OPENAI_API_KEY` is optional — enables voice message transcription via Whisper. `EIGENAI_API_KEY` is optional — enables voice assistant STT/TTS via EigenAI. `REFLECTION_CHANNEL_ID` is optional — sets the Discord channel where reflection daemon posts proposals. `GATEWAY_PORT` defaults to 3000. `GATEWAY_TOKEN` configures API auth (currently disabled). `LOG_LEVEL` controls logging verbosity. Voice tuning: `VOICE_MODEL`, `VOICE_SILENCE_MS`, `VOICE_MIN_UTTERANCE_MS`. Reflection tuning: `REFLECTION_INTERVAL_HOURS`, `REFLECTION_LOOKBACK_HOURS`, `REFLECTION_MIN_SIGNALS` (default 3), `REFLECTION_MODEL`. See `.env.example`.
+Requires either `ANTHROPIC_API_KEY` or `ANTHROPIC_BASE_URL` + `ANTHROPIC_AUTH_TOKEN` (for proxy). `DISCORD_BOT_TOKEN` is always required. `OPENAI_API_KEY` is optional — enables voice message transcription via Whisper. `EIGENAI_API_KEY` is optional — enables voice assistant STT/TTS via EigenAI. `MEM9_API_KEY` + `MEM9_ORG_ID` are optional — enable mem9 cloud memory (search + store). `REFLECTION_CHANNEL_ID` is optional — sets the Discord channel where reflection daemon posts proposals. `GATEWAY_PORT` defaults to 3000. `GATEWAY_TOKEN` configures API auth (currently disabled). `LOG_LEVEL` controls logging verbosity. Voice tuning: `VOICE_MODEL`, `VOICE_SILENCE_MS`, `VOICE_MIN_UTTERANCE_MS`. Reflection tuning: `REFLECTION_INTERVAL_HOURS`, `REFLECTION_LOOKBACK_HOURS`, `REFLECTION_MIN_SIGNALS` (default 3), `REFLECTION_MODEL`. See `.env.example`.

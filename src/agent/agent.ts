@@ -10,6 +10,7 @@ import { evolutionTools, handleEvolutionTool, setEvolutionContext } from "../evo
 import type { Message, ChannelConfig, TokenUsage } from "../db/index.js";
 import { recordSignal } from "../reflection/signals.js";
 import { getSkillService } from "../skills/service.js";
+import { mem9Enabled } from "../memory/mem9.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -112,6 +113,23 @@ Search memory when:
 - A user asks "do you remember…" or references something from the past
 - You need context about a user, project, or ongoing topic
 - You want to check if you've discussed something before`;
+
+const MEMORY_RECALL_WITH_MEM9 = `## Memory
+
+You have access to a persistent memory system with both local and cloud storage. Use it proactively:
+- **memory_search**: Search across local files AND mem9 cloud memory for relevant context. Use this before answering questions about people, preferences, past decisions, or facts.
+- **memory_get**: Read specific lines from a local memory file. Use after memory_search to get full context around a local result.
+- **memory_store**: Store important facts, preferences, or decisions in mem9 cloud memory. Use this when you learn something worth remembering about a user, project, or topic.
+
+Search memory when:
+- A user asks "do you remember…" or references something from the past
+- You need context about a user, project, or ongoing topic
+- You want to check if you've discussed something before
+
+Store memories when:
+- You learn an important fact about a user (name, preferences, projects)
+- A decision is made that should be remembered
+- You discover context that would be useful in future conversations`;
 
 const EVOLUTION_INSTRUCTIONS = `## Self-Evolution
 
@@ -221,8 +239,12 @@ function buildSystemPrompt(opts: {
     parts.push(skillsPrompt);
   }
 
-  // 3. Memory recall instructions
-  parts.push(MEMORY_RECALL_INSTRUCTIONS);
+  // 3. Memory recall instructions (enhanced if mem9 is configured)
+  if (mem9Enabled()) {
+    parts.push(MEMORY_RECALL_WITH_MEM9);
+  } else {
+    parts.push(MEMORY_RECALL_INSTRUCTIONS);
+  }
 
   // 3.5 Evolution instructions
   parts.push(EVOLUTION_INSTRUCTIONS);
@@ -287,9 +309,9 @@ async function executeTool(
 ): Promise<string> {
   let result: string;
 
-  // Memory tools are synchronous
-  if (name === "memory_search" || name === "memory_get") {
-    result = handleMemoryTool(name, input);
+  // Memory tools (now async due to mem9 integration)
+  if (name === "memory_search" || name === "memory_get" || name === "memory_store") {
+    result = await handleMemoryTool(name, input);
   }
   // Discord tools are async
   else if (name === "send_message" || name === "send_file" || name === "add_reaction" || name === "get_channel_history" || name === "create_thread") {
@@ -578,7 +600,13 @@ export async function processAgentTurn(opts: {
   if (skillsPrompt) {
     systemParts.push(skillsPrompt);
   }
-  systemParts.push(MEMORY_RECALL_INSTRUCTIONS);
+
+  // Memory instructions (enhanced if mem9 is configured)
+  if (mem9Enabled()) {
+    systemParts.push(MEMORY_RECALL_WITH_MEM9);
+  } else {
+    systemParts.push(MEMORY_RECALL_INSTRUCTIONS);
+  }
 
   // Add current time context for cron jobs too
   systemParts.push(`## Current Context\n- Current time: ${getCurrentTimestamp()}`);
