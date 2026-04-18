@@ -817,7 +817,7 @@ const TOOL_EMOJI: Record<string, string> = {
 };
 
 /** Max length for tool input/result preview in Discord message */
-const MAX_TOOL_PREVIEW_LENGTH = 300;
+
 
 /** Truncate a string and add ellipsis if too long */
 function truncate(s: string, max: number): string {
@@ -870,62 +870,52 @@ function formatToolInput(toolName: string, input: Record<string, unknown>): stri
 }
 
 /**
- * Format a tool result for display. Truncates and wraps in a code block.
+ * Extract an error message from a tool result, if any.
+ * Returns an error string if the tool failed, or null if it succeeded.
  */
-function formatToolResult(result: string): string {
-  // Try to parse JSON for prettier display
-  let display = result;
+function extractToolError(result: string): string | null {
   try {
     const parsed = JSON.parse(result);
     if (parsed.error) {
-      return `❌ Error: ${truncate(String(parsed.error), MAX_TOOL_PREVIEW_LENGTH)}`;
-    }
-    // For success responses, show a brief summary
-    if (parsed.success === true) {
-      // Remove the success field and show the rest briefly
-      const { success: _, ...rest } = parsed;
-      const restStr = JSON.stringify(rest);
-      if (restStr === "{}" || restStr === "{}") return "✅";
-      display = restStr;
-    } else {
-      display = JSON.stringify(parsed);
+      return truncate(String(parsed.error), 120);
     }
   } catch {
-    // Not JSON — use raw
+    // Not JSON
   }
-
-  const truncated = truncate(display, MAX_TOOL_PREVIEW_LENGTH);
-
-  // If short enough, inline it; otherwise use a code block
-  if (truncated.length < 80 && !truncated.includes("\n")) {
-    return truncated;
+  // Check for common error patterns in raw text
+  if (result.startsWith("Error:") || result.startsWith("error:")) {
+    return truncate(result, 120);
   }
-  return `\`\`\`\n${truncated}\n\`\`\``;
+  return null;
 }
 
 /**
  * Build the Discord message text for a tool call progress event.
+ * Shows tool name + input only. Appends error info if the tool failed.
  * Returns null if this tool call should be silently skipped.
  */
 function formatToolCallMessage(progress: ToolCallProgress): string | null {
-  const emoji = TOOL_EMOJI[progress.toolName] || "🔧";
+  const emoji = TOOL_EMOJI[progress.toolName] || "\u{1f527}";
+  const inputPreview = formatToolInput(progress.toolName, progress.toolInput);
+  const inputPart = inputPreview ? ` ${inputPreview}` : "";
 
   if (progress.phase === "start") {
-    const inputPreview = formatToolInput(progress.toolName, progress.toolInput);
-    const inputPart = inputPreview ? ` ${inputPreview}` : "";
     return `-# ${emoji} **${progress.toolName}**${inputPart}`;
   }
 
-  // phase === "result"
+  // phase === "result" — show tool name + input, append error only if failed
   if (progress.result !== undefined) {
-    const resultPreview = formatToolResult(progress.result);
-    const inputPreview = formatToolInput(progress.toolName, progress.toolInput);
-    const inputPart = inputPreview ? ` ${inputPreview}` : "";
-    return `-# ${emoji} **${progress.toolName}**${inputPart} → ${resultPreview}`;
+    const error = extractToolError(progress.result);
+    if (error) {
+      return `-# ${emoji} **${progress.toolName}**${inputPart} \u2014 \u274c ${error}`;
+    }
+    // Success — just show tool name + input (no result preview)
+    return `-# ${emoji} **${progress.toolName}**${inputPart}`;
   }
 
   return null;
 }
+
 
 // ---------------------------------------------------------------------------
 // Rate-limited tool call progress sender
