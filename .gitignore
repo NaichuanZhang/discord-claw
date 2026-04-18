@@ -14,3 +14,4 @@ reference/
 beta/
 data/.migrations/
 data/models/
+claude-history.md

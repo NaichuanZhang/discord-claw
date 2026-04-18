@@ -43,7 +43,7 @@ const MIN_SIGNALS_FOR_REFLECTION = parseInt(
 /** Prune signals older than this (default: 7 days) */
 const SIGNAL_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 
-const REFLECTION_MODEL = process.env.REFLECTION_MODEL || process.env.ANTHROPIC_MODEL || "bedrock-claude-opus-4-6-1m";
+const REFLECTION_MODEL = process.env.REFLECTION_MODEL || process.env.ANTHROPIC_MODEL || "bedrock-claude-opus-4-7-1m";
 
 function log(...args: unknown[]): void {
   console.log("[reflection]", ...args);

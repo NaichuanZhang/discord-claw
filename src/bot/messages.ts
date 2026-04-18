@@ -91,6 +91,50 @@ function splitMessage(text: string): string[] {
 }
 
 // ---------------------------------------------------------------------------
+// URL validation helper
+// ---------------------------------------------------------------------------
+
+/**
+ * Validate and optionally sanitize a URL for use in Discord embeds.
+ * Returns the sanitized URL string if valid, or null if the URL is malformed.
+ *
+ * Attempts basic fixes:
+ * - Prepend "https://" if protocol is missing
+ * - Encode spaces as %20
+ */
+function sanitizeImageUrl(url: string): string | null {
+  let candidate = url.trim();
+
+  // Quick reject: empty strings or obvious non-URLs
+  if (!candidate || candidate.length < 5) return null;
+
+  // Attempt fix: prepend https:// if no protocol
+  if (!candidate.match(/^https?:\/\//i)) {
+    // Only prepend if it looks like a domain (contains a dot)
+    if (candidate.includes(".")) {
+      candidate = `https://${candidate}`;
+    } else {
+      return null;
+    }
+  }
+
+  // Attempt fix: encode spaces
+  candidate = candidate.replace(/ /g, "%20");
+
+  // Validate with URL constructor
+  try {
+    const parsed = new URL(candidate);
+    // Ensure it's actually http(s) — reject data: URIs, javascript:, etc.
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+      return null;
+    }
+    return parsed.href;
+  } catch {
+    return null;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Image handling helpers
 // ---------------------------------------------------------------------------
 
@@ -100,16 +144,30 @@ const MAX_EMBEDS_PER_MESSAGE = 10;
 /**
  * Build Discord embeds for URL-based images.
  * Each image gets its own embed so Discord renders them all.
+ * Invalid URLs are filtered out with a warning log to prevent
+ * Discord API rejections (URL_TYPE_INVALID_URL).
  */
 function buildImageEmbeds(images: AgentImage[]): EmbedBuilder[] {
   const urlImages = images.filter((img) => img.type === "url");
-  return urlImages.slice(0, MAX_EMBEDS_PER_MESSAGE).map((img) => {
-    const embed = new EmbedBuilder().setImage(img.source);
+  const embeds: EmbedBuilder[] = [];
+
+  for (const img of urlImages.slice(0, MAX_EMBEDS_PER_MESSAGE)) {
+    const validUrl = sanitizeImageUrl(img.source);
+    if (!validUrl) {
+      console.warn(
+        `[bot] Skipping invalid image URL for embed: "${img.source.slice(0, 200)}"`,
+      );
+      continue;
+    }
+
+    const embed = new EmbedBuilder().setImage(validUrl);
     if (img.alt) {
       embed.setDescription(img.alt);
     }
-    return embed;
-  });
+    embeds.push(embed);
+  }
+
+  return embeds;
 }
 
 /**

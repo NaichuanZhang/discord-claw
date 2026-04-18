@@ -22,6 +22,11 @@ const execFileAsync = promisify(execFile);
 const GIT_TIMEOUT = 30_000;
 const GH_TIMEOUT = 30_000;
 
+/** Max retries for transient merge states (e.g. CI still running) */
+const MERGE_CHECK_MAX_RETRIES = 5;
+/** Delay between merge-readiness retries (10 seconds) */
+const MERGE_CHECK_RETRY_DELAY_MS = 10_000;
+
 // Channel where deployment notifications are posted as threads
 const DEPLOY_NOTIFY_CHANNEL_ID = "1493291137908216080";
 
@@ -94,6 +99,109 @@ export function setEvolutionCreateThread(
   fn: (channelId: string, name: string, message: string) => Promise<void>,
 ): void {
   _createDiscordThread = fn;
+}
+
+// ---------------------------------------------------------------------------
+// Merge readiness check
+// ---------------------------------------------------------------------------
+
+interface MergeReadiness {
+  mergeable: "MERGEABLE" | "CONFLICTING" | "UNKNOWN" | string;
+  mergeStateStatus: "CLEAN" | "BLOCKED" | "BEHIND" | "DIRTY" | "HAS_HOOKS" | "UNKNOWN" | "UNSTABLE" | string;
+  state: "OPEN" | "CLOSED" | "MERGED" | string;
+}
+
+/**
+ * Check if a PR is ready to merge. Returns the merge state or throws
+ * a descriptive error for permanent failures (conflicts, closed, etc.).
+ * For transient states (CI pending), retries with backoff.
+ */
+async function waitForMergeReady(prNumber: number): Promise<void> {
+  for (let attempt = 1; attempt <= MERGE_CHECK_MAX_RETRIES; attempt++) {
+    log(`Checking mergeability for PR #${prNumber} (attempt ${attempt}/${MERGE_CHECK_MAX_RETRIES})...`);
+
+    const { stdout } = await gh([
+      "pr",
+      "view",
+      String(prNumber),
+      "--json",
+      "mergeable,mergeStateStatus,state",
+    ]);
+
+    let status: MergeReadiness;
+    try {
+      status = JSON.parse(stdout) as MergeReadiness;
+    } catch {
+      log(`Failed to parse PR status JSON: ${stdout.slice(0, 200)}`);
+      throw new Error(`Could not parse PR #${prNumber} merge status`);
+    }
+
+    log(`PR #${prNumber} status: state=${status.state}, mergeable=${status.mergeable}, mergeState=${status.mergeStateStatus}`);
+
+    // PR already merged or closed — permanent states
+    if (status.state === "MERGED") {
+      throw new Error(`PR #${prNumber} has already been merged.`);
+    }
+    if (status.state === "CLOSED") {
+      throw new Error(`PR #${prNumber} is closed. Reopen it first.`);
+    }
+
+    // Merge conflicts — permanent, needs manual resolution
+    if (status.mergeable === "CONFLICTING") {
+      throw new Error(
+        `PR #${prNumber} has merge conflicts. Resolve the conflicts and try again.`,
+      );
+    }
+
+    // Clean and mergeable — good to go!
+    if (status.mergeable === "MERGEABLE" && status.mergeStateStatus === "CLEAN") {
+      log(`PR #${prNumber} is ready to merge`);
+      return;
+    }
+
+    // BEHIND means branch is out of date with base — we can still merge with squash
+    if (status.mergeable === "MERGEABLE" && status.mergeStateStatus === "BEHIND") {
+      log(`PR #${prNumber} is behind base branch but mergeable — proceeding`);
+      return;
+    }
+
+    // HAS_HOOKS means pre-merge hooks exist but it's mergeable
+    if (status.mergeable === "MERGEABLE" && status.mergeStateStatus === "HAS_HOOKS") {
+      log(`PR #${prNumber} has merge hooks but is mergeable — proceeding`);
+      return;
+    }
+
+    // UNSTABLE means some checks failed but it's technically mergeable
+    if (status.mergeable === "MERGEABLE" && status.mergeStateStatus === "UNSTABLE") {
+      log(`PR #${prNumber} has failing checks but is mergeable — proceeding with caution`);
+      return;
+    }
+
+    // BLOCKED typically means CI is still running or required reviews pending
+    // UNKNOWN means GitHub hasn't computed mergeability yet
+    // These are transient — retry
+    const isTransient =
+      status.mergeStateStatus === "BLOCKED" ||
+      status.mergeable === "UNKNOWN" ||
+      status.mergeStateStatus === "UNKNOWN";
+
+    if (isTransient && attempt < MERGE_CHECK_MAX_RETRIES) {
+      log(`PR #${prNumber} not yet mergeable (transient state) — retrying in ${MERGE_CHECK_RETRY_DELAY_MS / 1000}s...`);
+      await new Promise((resolve) => setTimeout(resolve, MERGE_CHECK_RETRY_DELAY_MS));
+      continue;
+    }
+
+    // Exhausted retries or unexpected state
+    if (status.mergeStateStatus === "BLOCKED") {
+      throw new Error(
+        `PR #${prNumber} is blocked from merging. This usually means required status checks haven't passed or required reviews are missing. Check the PR on GitHub for details.`,
+      );
+    }
+
+    throw new Error(
+      `PR #${prNumber} is not mergeable (mergeable=${status.mergeable}, mergeState=${status.mergeStateStatus}). Check the PR on GitHub for details.`,
+    );
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -336,6 +444,7 @@ export async function cancelEvolution(id: string): Promise<void> {
 
 /**
  * Merge a proposed evolution PR and trigger a restart to deploy it.
+ * Checks PR mergeability first and retries for transient states (CI pending).
  */
 export async function mergeEvolution(opts: {
   id: string;
@@ -351,6 +460,9 @@ export async function mergeEvolution(opts: {
   if (!evolution.prNumber) {
     throw new Error(`Evolution ${opts.id} has no PR number`);
   }
+
+  // Pre-check: wait for PR to be in a mergeable state
+  await waitForMergeReady(evolution.prNumber);
 
   log(`Merging PR #${evolution.prNumber} for evolution ${opts.id}...`);
   await gh(["pr", "merge", String(evolution.prNumber), "--squash", "--delete-branch"]);

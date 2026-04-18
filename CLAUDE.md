@@ -11,6 +11,8 @@ npm run build:ui     # Build dashboard SPA only
 npm run typecheck    # tsc --noEmit
 npm test             # Run integration tests (vitest run)
 npm run test:watch   # Run tests in watch mode
+npx vitest run tests/integration/foo.test.ts  # Run a single test file
+npm run daemon       # Start watchdog daemon (spawns bot, health checks, crash recovery)
 ./start.sh           # Production: git pull → migrate → build → start → health check → rollback
 ```
 
@@ -21,13 +23,13 @@ The dashboard SPA lives at `src/gateway/ui/` and builds to `dist/ui/`. Vite dev 
 Integration tests live in `tests/integration/` and use **vitest**. They validate the critical boot path without calling external APIs:
 
 - **Database**: Schema init, table existence, CRUD operations
-- **Soul**: Loading and hot-reload from `data/SOUL.md`
+- **Soul**: Loading from `data/SOUL.md`
 - **Memory**: FTS5 indexing, search queries
 - **Skills**: Service init, prompt section generation
 - **Image extraction**: Pure function — markdown parsing for URL/file images
 - **Tool registration**: All tool arrays export correctly with unique names
 
-Tests run automatically as a quality gate in the evolution engine — `finalizeEvolution()` runs both `tsc --noEmit` and `vitest run` before allowing a PR to be created. If tests fail, the PR is blocked.
+Tests run automatically as a quality gate in the evolution engine — `finalizeEvolution()` runs both `tsc --noEmit` and `vitest run` (120s timeout) before allowing a PR to be created. If either fails, the PR is blocked.
 
 To add new tests, create files matching `tests/**/*.test.ts`.
 
@@ -39,7 +41,7 @@ This is a Discord bot that uses Claude as its AI backend. The system has major s
 
 Discord messages flow through `bot/messages.ts` (filter, session resolve, thread creation, voice transcription, context build) → `agent/agent.ts` (system prompt assembly, tool loop with duplicate detection) → Anthropic SDK. The agent returns an `AgentResponse` with text, extracted images (from markdown `![](url)` syntax), and aggregated token usage. `messages.ts` renders images as Discord embeds (URLs) or attachments (local files), and stores usage data alongside the assistant message in SQLite.
 
-Key constants in `agent/agent.ts`: `DEFAULT_MODEL = "bedrock-claude-opus-4-6-1m"`, `MAX_TOKENS = 16384`, `MAX_CONSECUTIVE_DUPES = 2` (breaks infinite tool loops).
+Key constants in `agent/agent.ts`: `DEFAULT_MODEL = "bedrock-claude-opus-4-7-1m"`, `MAX_TOKENS = 16384`, `MAX_CONSECUTIVE_DUPES = 2` (breaks infinite tool loops).
 
 ### Agent Tools
 
@@ -49,7 +51,7 @@ Tools are defined across multiple files and registered in `agent/agent.ts`:
 |------|-------|---------|
 | `agent/tools.ts` | send_message, send_file, add_reaction, get_channel_history, create_thread | Discord channel operations |
 | `agent/dangerous-tools.ts` | bash, read_file, write_file | System access |
-| `agent/agent.ts` | get_conversation_history, get_conversation_stats | Cross-session conversation replay |
+| `shared/conversation-history.ts` | get_conversation_history, get_conversation_stats | Cross-session conversation replay |
 | `memory/tools.ts` | memory_search, memory_get, mem9_store, mem9_update, mem9_delete | Hybrid search: local BM25 FTS5 + mem9 cloud memory |
 | `memory/mem9.ts` | (internal) | mem9 cloud memory API client |
 | `skills/tools.ts` | read_skill, list_skill_files | Progressive skill loading |
@@ -63,15 +65,25 @@ In guild text channels, the bot always creates a new thread on the user's messag
 
 ### Voice System
 
-`src/voice/` implements a full voice assistant pipeline: Discord audio → Opus decode → downsample to 16kHz mono (`receiver.ts`) → Silero VAD v4 (`vad.ts`, frame size 480 samples = 30ms) → EigenAI Whisper STT (`stt.ts`) → Claude Sonnet agent (`agent.ts`, model `claude-sonnet-4-20250514` configurable via `VOICE_MODEL`) → EigenAI Chatterbox TTS (`tts.ts`) → playback. STT/TTS require `EIGENAI_API_KEY`. `autoJoin.ts` tracks a configured user and auto-joins/leaves their voice channel. The voice agent has the same tools as the main agent except evolution tools.
+`src/voice/` implements a full voice assistant pipeline: Discord audio → Opus decode → downsample to 16kHz mono (`receiver.ts`) → Silero VAD v4 (`vad.ts`, frame size 480 samples = 30ms) → EigenAI Whisper STT (`stt.ts`) → LLM agent (`agent.ts`) → EigenAI Chatterbox TTS (`tts.ts`) → playback.
 
-Key voice constants: `SILENCE_DURATION_MS = 1500`, `MIN_UTTERANCE_MS = 500`, `IDLE_TIMEOUT_MS = 10min` (auto-leave), `VOICE_MAX_TOKENS = 1024`. Configurable via `VOICE_SILENCE_MS`, `VOICE_MIN_UTTERANCE_MS` env vars.
+Two LLM backends:
+- **Anthropic** (default): `claude-sonnet-4-20250514` configurable via `VOICE_MODEL`. Full tool support with up to 5 tool rounds per utterance.
+- **Eigen LLM** (`eigenllm.ts`): Set `VOICE_MODEL=eigen:<model>` (e.g., `eigen:qwen3-8b-fp8`). OpenAI-compatible streaming, pure text mode (no tools) for minimum latency.
+
+Tool availability configurable via `VOICE_TOOLS_MODE`:
+- `full` (default): memory, conversation history, Discord, skills, bash, file I/O — everything except evolution tools
+- `minimal`: memory + conversation history only
+
+`autoJoin.ts` tracks a configured user and auto-joins/leaves their voice channel. STT/TTS require `EIGENAI_API_KEY`.
+
+Key voice constants: `SILENCE_DURATION_MS = 800` (configurable via `VOICE_SILENCE_MS`), `MIN_UTTERANCE_MS = 500` (configurable via `VOICE_MIN_UTTERANCE_MS`), `IDLE_TIMEOUT_MS = 10min` (auto-leave), `VOICE_MAX_TOKENS = 512` (configurable via `VOICE_MAX_TOKENS`), `MAX_TOOL_ROUNDS = 5`, `MAX_VOICE_HISTORY = 10` turns. Streaming TTS pipelining enabled by default (disable with `VOICE_TTS_STREAM=0`).
 
 Separate from voice chat: `audio/transcribe.ts` handles Discord voice message transcription (audio attachments) via OpenAI's Whisper API.
 
 ### Session Management
 
-Sessions are keyed by thread/channel/user/DM combination. `agent/sessions.ts` resolves the correct session and loads history from SQLite. Sessions auto-expire based on `SESSION_TTL_HOURS`. Thread-based sessions use the `thread:<threadId>` key format. Messages are archived across sessions, queryable via `get_conversation_history` and `get_conversation_stats` tools.
+Sessions are keyed by thread/channel/user/DM combination. `agent/sessions.ts` resolves the correct session and loads history from SQLite. Sessions auto-expire based on `SESSION_TTL_HOURS`. Thread-based sessions use the `thread:<threadId>` key format. Messages are archived across sessions, queryable via `get_conversation_history` and `get_conversation_stats` tools (defined in `shared/conversation-history.ts`).
 
 ### Soul, Memory, and Skills
 
@@ -88,7 +100,7 @@ Scheduled tasks in `data/cron/jobs.json` (gitignored; seed file tracked). Three 
 Self-modification via GitHub PRs. `src/evolution/engine.ts` manages git worktrees at `beta/`, runs typecheck and integration tests, pushes branches, creates PRs via `gh` CLI. Evolution status flow: `idea` → `proposing` → `proposed` (PR open) → `deployed` (merged). Also: `cancelled`, `rejected`, `rolled_back`. On startup, `syncDeployedEvolutions()` checks if proposed PRs were merged. `evolve_merge` merges the PR, posts a deployment notification thread to a configured channel, and triggers restart.
 
 **Quality gates in `finalizeEvolution()`:**
-1. `tsc --noEmit` — TypeScript typecheck
+1. `tsc --noEmit` — TypeScript typecheck (60s timeout)
 2. `vitest run` — Integration tests (120s timeout)
 3. Both must pass before the PR is created
 
@@ -127,6 +139,8 @@ Shell scripts in `migrations/` run by `start.sh` before build. All idempotent (`
 - **Evolution isolation**: `beta/` is a git worktree (gitignored). The running bot's source is never modified directly — all changes go through PRs.
 - **Cron delivery separation**: `agentTurn` jobs let the agent handle all delivery. `systemEvent` jobs have results delivered by cron service directly. This prevents duplicate messages outside threads.
 - **Skill vs Code guardrail**: The evolution system prompt includes a mandatory pre-flight decision tree. Before starting code evolution, the agent must evaluate whether the capability can be a skill or soul/memory change. See `EVOLUTION_INSTRUCTIONS` in `src/agent/agent.ts`.
+- **Shared utilities**: `src/shared/` contains extracted helpers used by both the main agent and the voice agent — `paths.ts` (project root resolution), `anthropic.ts` (SDK client factory), `discord-utils.ts` (channel/guild helpers), `conversation-history.ts` (cross-session message loading + conversation history tool definitions). Import from `shared/` when adding code that both pipelines need.
+- **Watchdog daemon**: `src/daemon/index.ts` is a standalone process (zero imports from the main bot) that spawns the bot, monitors health, handles crash recovery with evolution rollback, and sends Discord webhook notifications. Exit code 100 from the bot triggers a deploy-restart (git pull + rebuild) rather than a simple respawn.
 - **Signal collection is passive and non-blocking**: `recordSignal()` never throws — errors during recording are caught and logged.
 - **Token usage**: Aggregated across all API calls within a single user→response turn (including tool-use loops). Costs computed at query time (not stored) so pricing can be updated without migration.
 - **Production deployment**: `start.sh` runs: kill existing → git pull → npm ci (if lockfile changed) → migrations → seed cron → build → start → health check (30s timeout) → auto-rollback on failure. Discord webhook notifications on success/failure.
@@ -144,4 +158,6 @@ Skills are preferred over code when possible: they're cheaper, safer, instantly 
 
 ## Environment
 
-Requires either `ANTHROPIC_API_KEY` or `ANTHROPIC_BASE_URL` + `ANTHROPIC_AUTH_TOKEN` (for proxy). `DISCORD_BOT_TOKEN` is always required. `OPENAI_API_KEY` is optional — enables voice message transcription via Whisper. `EIGENAI_API_KEY` is optional — enables voice assistant STT/TTS via EigenAI. `REFLECTION_CHANNEL_ID` is optional — sets the Discord channel where reflection daemon posts proposals. `GATEWAY_PORT` defaults to 3000. `GATEWAY_TOKEN` configures API auth (currently disabled). `LOG_LEVEL` controls logging verbosity. Voice tuning: `VOICE_MODEL`, `VOICE_SILENCE_MS`, `VOICE_MIN_UTTERANCE_MS`. Reflection tuning: `REFLECTION_INTERVAL_HOURS`, `REFLECTION_LOOKBACK_HOURS`, `REFLECTION_MIN_SIGNALS` (default 3), `REFLECTION_MODEL`. mem9 cloud memory: configured via `data/skills/mem9/auth.json` (contains `api_key`), not via `.env`. See `.env.example`.
+`reference/` contains the upstream openclaw source (read-only) — useful for understanding original patterns when this fork diverges. It is not part of the build.
+
+Requires either `ANTHROPIC_API_KEY` or `ANTHROPIC_BASE_URL` + `ANTHROPIC_AUTH_TOKEN` (for proxy). `DISCORD_BOT_TOKEN` is always required. `OPENAI_API_KEY` is optional — enables voice message transcription via Whisper. `EIGENAI_API_KEY` is optional — enables voice assistant STT/TTS via EigenAI. `REFLECTION_CHANNEL_ID` is optional — sets the Discord channel where reflection daemon posts proposals. `GATEWAY_PORT` defaults to 3000. `GATEWAY_TOKEN` configures API auth (currently disabled). Voice tuning: `VOICE_MODEL` (supports `eigen:<model>` prefix for Eigen LLM), `VOICE_SILENCE_MS` (default 800), `VOICE_MIN_UTTERANCE_MS` (default 500), `VOICE_MAX_TOKENS` (default 512), `VOICE_DEBUG` (default on), `VOICE_TTS_STREAM` (default on), `VOICE_TOOLS_MODE` (`full` or `minimal`, default `full`). Reflection tuning: `REFLECTION_INTERVAL_HOURS`, `REFLECTION_LOOKBACK_HOURS`, `REFLECTION_MIN_SIGNALS` (default 3), `REFLECTION_MODEL`. mem9 cloud memory: configured via `data/skills/mem9/auth.json` (contains `api_key`), not via `.env`. See `.env.example`.
