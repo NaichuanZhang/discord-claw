@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from "react";
-import { apiFetch, relativeTime, C, S } from "../App";
+import { apiFetch, relativeTime, C, S } from "../shared";
 
 interface EvolutionRecord {
   id: string;
