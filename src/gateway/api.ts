@@ -19,6 +19,14 @@ import {
   getIdeas,
   updateEvolution,
 } from "../evolution/log.js";
+import {
+  getAppLogs,
+  getErrorLogs,
+  getErrorCountsByCategory,
+  getToolCallLogs,
+  getToolCallStats,
+  getSlowestToolCalls,
+} from "../logging/queries.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -43,6 +51,12 @@ function safePath(relativePath: string): string | null {
 function param(req: Request, name: string): string {
   const val = req.params[name];
   return Array.isArray(val) ? val[0] : val;
+}
+
+/** Parse time window from query string — accepts hours as a number, defaults to 24. */
+function parseTimeWindow(req: Request): number {
+  const hours = parseFloat(req.query.hours as string);
+  return (isNaN(hours) || hours <= 0 ? 24 : hours) * 60 * 60 * 1000;
 }
 
 // ---------------------------------------------------------------------------
@@ -567,6 +581,95 @@ export function createApiRouter(opts: {
       res.json({ ok: true });
     } catch (err) {
       log("Error in POST /evolutions/:id/dismiss:", err);
+      res.status(500).json({ error: String(err) });
+    }
+  });
+
+  // =========================================================================
+  // Logs (structured — application_log, error_log, tool_call_log)
+  // =========================================================================
+
+  /** GET /api/logs/app — query application log entries */
+  router.get("/logs/app", (req: Request, res: Response) => {
+    try {
+      const sinceMs = parseTimeWindow(req);
+      const level = req.query.level as string | undefined;
+      const category = req.query.category as string | undefined;
+      const limit = parseInt(req.query.limit as string, 10) || 200;
+
+      const logs = getAppLogs({ sinceMs, level, category, limit });
+      res.json({ logs });
+    } catch (err) {
+      log("Error in GET /logs/app:", err);
+      res.status(500).json({ error: String(err) });
+    }
+  });
+
+  /** GET /api/logs/errors — query error log entries */
+  router.get("/logs/errors", (req: Request, res: Response) => {
+    try {
+      const sinceMs = parseTimeWindow(req);
+      const category = req.query.category as string | undefined;
+      const limit = parseInt(req.query.limit as string, 10) || 200;
+
+      const logs = getErrorLogs({ sinceMs, category, limit });
+      res.json({ logs });
+    } catch (err) {
+      log("Error in GET /logs/errors:", err);
+      res.status(500).json({ error: String(err) });
+    }
+  });
+
+  /** GET /api/logs/errors/stats — error counts by category */
+  router.get("/logs/errors/stats", (req: Request, res: Response) => {
+    try {
+      const sinceMs = parseTimeWindow(req);
+      const counts = getErrorCountsByCategory(sinceMs);
+      res.json({ counts });
+    } catch (err) {
+      log("Error in GET /logs/errors/stats:", err);
+      res.status(500).json({ error: String(err) });
+    }
+  });
+
+  /** GET /api/logs/tools — query tool call log entries */
+  router.get("/logs/tools", (req: Request, res: Response) => {
+    try {
+      const sinceMs = parseTimeWindow(req);
+      const tool = req.query.tool as string | undefined;
+      const successOnly = req.query.success === "true";
+      const failedOnly = req.query.failed === "true";
+      const limit = parseInt(req.query.limit as string, 10) || 200;
+
+      const logs = getToolCallLogs({ sinceMs, tool, successOnly, failedOnly, limit });
+      res.json({ logs });
+    } catch (err) {
+      log("Error in GET /logs/tools:", err);
+      res.status(500).json({ error: String(err) });
+    }
+  });
+
+  /** GET /api/logs/tools/stats — tool call statistics (count, failure rate, avg/max duration) */
+  router.get("/logs/tools/stats", (req: Request, res: Response) => {
+    try {
+      const sinceMs = parseTimeWindow(req);
+      const stats = getToolCallStats(sinceMs);
+      res.json({ stats });
+    } catch (err) {
+      log("Error in GET /logs/tools/stats:", err);
+      res.status(500).json({ error: String(err) });
+    }
+  });
+
+  /** GET /api/logs/tools/slowest — slowest tool calls */
+  router.get("/logs/tools/slowest", (req: Request, res: Response) => {
+    try {
+      const sinceMs = parseTimeWindow(req);
+      const limit = parseInt(req.query.limit as string, 10) || 10;
+      const logs = getSlowestToolCalls({ sinceMs, limit });
+      res.json({ logs });
+    } catch (err) {
+      log("Error in GET /logs/tools/slowest:", err);
       res.status(500).json({ error: String(err) });
     }
   });

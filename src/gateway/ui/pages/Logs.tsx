@@ -1,15 +1,239 @@
 import React, { useState, useEffect, useRef, useCallback } from "react";
-import { C, S } from "../App";
+import { apiFetch, relativeTime, C, S } from "../App";
 
-interface LogEntry {
+// ---------------------------------------------------------------------------
+// Types
+// ---------------------------------------------------------------------------
+
+interface LiveLogEntry {
   timestamp: string;
   message: string;
   level?: string;
   [key: string]: any;
 }
 
-export default function Logs() {
-  const [logs, setLogs] = useState<LogEntry[]>([]);
+interface AppLogEntry {
+  id: number;
+  level: string;
+  category: string;
+  message: string;
+  metadata: string | null;
+  sessionId: string | null;
+  userId: string | null;
+  createdAt: number;
+}
+
+interface ErrorLogEntry {
+  id: number;
+  level: string;
+  category: string;
+  message: string;
+  stack: string | null;
+  metadata: string | null;
+  sessionId: string | null;
+  userId: string | null;
+  createdAt: number;
+}
+
+interface ToolCallEntry {
+  id: number;
+  tool: string;
+  input: string | null;
+  result: string | null;
+  success: boolean;
+  error: string | null;
+  durationMs: number;
+  context: string | null;
+  sessionId: string | null;
+  userId: string | null;
+  createdAt: number;
+}
+
+interface ToolStat {
+  tool: string;
+  totalCalls: number;
+  failures: number;
+  avgDurationMs: number;
+  maxDurationMs: number;
+}
+
+type Tab = "live" | "app" | "errors" | "tools";
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+const levelColor = (level?: string) => {
+  if (!level) return C.text;
+  const l = level.toLowerCase();
+  if (l === "error" || l === "fatal") return C.error;
+  if (l === "warn" || l === "warning") return C.warning;
+  if (l === "debug" || l === "trace") return C.textDim;
+  return C.text;
+};
+
+const formatTs = (iso: string | number) => {
+  try {
+    return new Date(iso).toLocaleTimeString("en-US", { hour12: false });
+  } catch {
+    return String(iso);
+  }
+};
+
+const formatDateTime = (ts: number) => {
+  try {
+    const d = new Date(ts);
+    return d.toLocaleString("en-US", {
+      month: "short",
+      day: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+      hour12: false,
+    });
+  } catch {
+    return String(ts);
+  }
+};
+
+const TIME_OPTIONS: { label: string; hours: number }[] = [
+  { label: "1h", hours: 1 },
+  { label: "6h", hours: 6 },
+  { label: "24h", hours: 24 },
+  { label: "3d", hours: 72 },
+  { label: "7d", hours: 168 },
+];
+
+// ---------------------------------------------------------------------------
+// Sub-components
+// ---------------------------------------------------------------------------
+
+function TabBar({
+  active,
+  onChange,
+}: {
+  active: Tab;
+  onChange: (t: Tab) => void;
+}) {
+  const tabs: { key: Tab; label: string }[] = [
+    { key: "live", label: "🔴 Live" },
+    { key: "app", label: "📋 App Logs" },
+    { key: "errors", label: "⚠️ Errors" },
+    { key: "tools", label: "🔧 Tool Calls" },
+  ];
+
+  return (
+    <div style={{ display: "flex", gap: 2, marginBottom: 12 }}>
+      {tabs.map(({ key, label }) => (
+        <button
+          key={key}
+          onClick={() => onChange(key)}
+          style={{
+            padding: "6px 16px",
+            background: active === key ? C.accent : C.surface,
+            color: active === key ? "#fff" : C.textDim,
+            border: "none",
+            borderRadius: "4px 4px 0 0",
+            cursor: "pointer",
+            fontSize: 13,
+            fontWeight: active === key ? 600 : 400,
+            transition: "all 0.15s",
+          }}
+        >
+          {label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function TimeWindowPicker({
+  hours,
+  onChange,
+}: {
+  hours: number;
+  onChange: (h: number) => void;
+}) {
+  return (
+    <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
+      <span style={{ fontSize: 12, color: C.textDim, marginRight: 4 }}>
+        Window:
+      </span>
+      {TIME_OPTIONS.map((opt) => (
+        <button
+          key={opt.hours}
+          onClick={() => onChange(opt.hours)}
+          style={{
+            padding: "2px 8px",
+            background: hours === opt.hours ? C.accent : C.primary,
+            color: hours === opt.hours ? "#fff" : C.textDim,
+            border: "none",
+            borderRadius: 3,
+            cursor: "pointer",
+            fontSize: 11,
+          }}
+        >
+          {opt.label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function ExpandableRow({
+  label,
+  content,
+}: {
+  label: string;
+  content: string | null;
+}) {
+  const [open, setOpen] = useState(false);
+  if (!content) return null;
+
+  return (
+    <div style={{ marginTop: 4 }}>
+      <button
+        onClick={() => setOpen(!open)}
+        style={{
+          background: "none",
+          border: "none",
+          color: C.accent,
+          cursor: "pointer",
+          fontSize: 11,
+          padding: 0,
+          textDecoration: "underline",
+        }}
+      >
+        {open ? "▾" : "▸"} {label}
+      </button>
+      {open && (
+        <pre
+          style={{
+            background: C.bg,
+            padding: 8,
+            borderRadius: 4,
+            fontSize: 11,
+            marginTop: 4,
+            whiteSpace: "pre-wrap",
+            wordBreak: "break-word",
+            maxHeight: 300,
+            overflow: "auto",
+            color: C.textDim,
+          }}
+        >
+          {content}
+        </pre>
+      )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Live Stream Tab
+// ---------------------------------------------------------------------------
+
+function LiveTab() {
+  const [logs, setLogs] = useState<LiveLogEntry[]>([]);
   const [filter, setFilter] = useState("");
   const [connected, setConnected] = useState(false);
   const [autoScroll, setAutoScroll] = useState(true);
@@ -31,7 +255,7 @@ export default function Logs() {
     ws.onmessage = (ev) => {
       try {
         const data = JSON.parse(ev.data);
-        const entry: LogEntry =
+        const entry: LiveLogEntry =
           typeof data === "string"
             ? { timestamp: new Date().toISOString(), message: data }
             : {
@@ -68,7 +292,6 @@ export default function Logs() {
     };
   }, [connect]);
 
-  // Auto-scroll
   useEffect(() => {
     if (autoScroll && containerRef.current) {
       containerRef.current.scrollTop = containerRef.current.scrollHeight;
@@ -90,61 +313,35 @@ export default function Logs() {
       )
     : logs;
 
-  const levelColor = (level?: string) => {
-    if (!level) return C.text;
-    const l = level.toLowerCase();
-    if (l === "error" || l === "fatal") return C.error;
-    if (l === "warn" || l === "warning") return C.warning;
-    if (l === "debug" || l === "trace") return C.textDim;
-    return C.text;
-  };
-
-  const formatTs = (iso: string) => {
-    try {
-      return new Date(iso).toLocaleTimeString("en-US", { hour12: false });
-    } catch {
-      return iso;
-    }
-  };
-
   return (
-    <div
-      style={{
-        display: "flex",
-        flexDirection: "column",
-        height: "calc(100vh - 48px)",
-      }}
-    >
+    <>
       <div
         style={{
           display: "flex",
           justifyContent: "space-between",
           alignItems: "center",
-          marginBottom: 12,
+          marginBottom: 8,
         }}
       >
-        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-          <h2 style={{ ...S.h2, marginBottom: 0 }}>Logs</h2>
+        <span
+          style={{
+            display: "inline-flex",
+            alignItems: "center",
+            gap: 4,
+            fontSize: 12,
+          }}
+        >
           <span
             style={{
-              display: "inline-flex",
-              alignItems: "center",
-              gap: 4,
-              fontSize: 12,
+              display: "inline-block",
+              width: 8,
+              height: 8,
+              borderRadius: "50%",
+              background: connected ? C.success : C.error,
             }}
-          >
-            <span
-              style={{
-                display: "inline-block",
-                width: 8,
-                height: 8,
-                borderRadius: "50%",
-                background: connected ? C.success : C.error,
-              }}
-            />
-            {connected ? "Connected" : "Disconnected"}
-          </span>
-        </div>
+          />
+          {connected ? "Connected" : "Disconnected"}
+        </span>
         <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
           <input
             value={filter}
@@ -241,9 +438,708 @@ export default function Logs() {
             zIndex: 10,
           }}
         >
-          Scroll to bottom
+          ↓ Scroll to bottom
         </button>
       )}
+    </>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// App Logs Tab
+// ---------------------------------------------------------------------------
+
+function AppLogsTab() {
+  const [logs, setLogs] = useState<AppLogEntry[]>([]);
+  const [hours, setHours] = useState(24);
+  const [level, setLevel] = useState("");
+  const [category, setCategory] = useState("");
+  const [filter, setFilter] = useState("");
+  const [loading, setLoading] = useState(false);
+
+  const fetch_ = useCallback(async () => {
+    setLoading(true);
+    try {
+      const params = new URLSearchParams({ hours: String(hours), limit: "500" });
+      if (level) params.set("level", level);
+      if (category) params.set("category", category);
+      const data = await apiFetch<{ logs: AppLogEntry[] }>(
+        `/api/logs/app?${params}`,
+      );
+      setLogs(data.logs);
+    } catch (err) {
+      console.error("Failed to fetch app logs:", err);
+    } finally {
+      setLoading(false);
+    }
+  }, [hours, level, category]);
+
+  useEffect(() => {
+    fetch_();
+  }, [fetch_]);
+
+  const filtered = filter
+    ? logs.filter(
+        (l) =>
+          l.message.toLowerCase().includes(filter.toLowerCase()) ||
+          l.category.toLowerCase().includes(filter.toLowerCase()),
+      )
+    : logs;
+
+  return (
+    <>
+      <div
+        style={{
+          display: "flex",
+          gap: 12,
+          alignItems: "center",
+          flexWrap: "wrap",
+          marginBottom: 8,
+        }}
+      >
+        <TimeWindowPicker hours={hours} onChange={setHours} />
+        <select
+          value={level}
+          onChange={(e) => setLevel(e.target.value)}
+          style={{ ...S.input, fontSize: 12, width: 100 }}
+        >
+          <option value="">All levels</option>
+          <option value="debug">Debug</option>
+          <option value="info">Info</option>
+          <option value="warn">Warn</option>
+          <option value="error">Error</option>
+        </select>
+        <select
+          value={category}
+          onChange={(e) => setCategory(e.target.value)}
+          style={{ ...S.input, fontSize: 12, width: 120 }}
+        >
+          <option value="">All categories</option>
+          {[
+            "agent",
+            "bot",
+            "cron",
+            "daemon",
+            "db",
+            "evolution",
+            "gateway",
+            "memory",
+            "reflection",
+            "skills",
+            "soul",
+            "voice",
+            "startup",
+            "shutdown",
+          ].map((c) => (
+            <option key={c} value={c}>
+              {c}
+            </option>
+          ))}
+        </select>
+        <input
+          value={filter}
+          onChange={(e) => setFilter(e.target.value)}
+          placeholder="Search..."
+          style={{ ...S.input, width: 180, fontSize: 12 }}
+        />
+        <button style={S.btnSmall} onClick={fetch_}>
+          {loading ? "Loading..." : "Refresh"}
+        </button>
+        <span style={{ fontSize: 11, color: C.textDim }}>
+          {filtered.length} entries
+        </span>
+      </div>
+
+      <div
+        style={{
+          flex: 1,
+          background: C.surface,
+          borderRadius: 6,
+          overflowY: "auto",
+          fontFamily: "monospace",
+          fontSize: 12,
+        }}
+      >
+        <table style={S.table}>
+          <thead>
+            <tr>
+              <th style={{ ...S.th, width: 140 }}>Time</th>
+              <th style={{ ...S.th, width: 50 }}>Level</th>
+              <th style={{ ...S.th, width: 90 }}>Category</th>
+              <th style={S.th}>Message</th>
+            </tr>
+          </thead>
+          <tbody>
+            {filtered.length === 0 ? (
+              <tr>
+                <td colSpan={4} style={{ ...S.td, color: C.textDim, textAlign: "center" }}>
+                  {loading ? "Loading..." : "No log entries found"}
+                </td>
+              </tr>
+            ) : (
+              filtered.map((entry) => (
+                <tr key={entry.id}>
+                  <td style={{ ...S.td, color: C.textDim, fontSize: 11 }}>
+                    {formatDateTime(entry.createdAt)}
+                  </td>
+                  <td style={S.td}>
+                    <span
+                      style={{
+                        ...S.badge(levelColor(entry.level)),
+                        textTransform: "uppercase",
+                      }}
+                    >
+                      {entry.level}
+                    </span>
+                  </td>
+                  <td style={{ ...S.td, color: C.textDim, fontSize: 11 }}>
+                    {entry.category}
+                  </td>
+                  <td style={{ ...S.td, whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
+                    <span style={{ color: levelColor(entry.level) }}>
+                      {entry.message}
+                    </span>
+                    <ExpandableRow label="metadata" content={entry.metadata} />
+                  </td>
+                </tr>
+              ))
+            )}
+          </tbody>
+        </table>
+      </div>
+    </>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Errors Tab
+// ---------------------------------------------------------------------------
+
+function ErrorsTab() {
+  const [logs, setLogs] = useState<ErrorLogEntry[]>([]);
+  const [stats, setStats] = useState<Record<string, number>>({});
+  const [hours, setHours] = useState(24);
+  const [category, setCategory] = useState("");
+  const [filter, setFilter] = useState("");
+  const [loading, setLoading] = useState(false);
+
+  const fetch_ = useCallback(async () => {
+    setLoading(true);
+    try {
+      const params = new URLSearchParams({ hours: String(hours), limit: "500" });
+      if (category) params.set("category", category);
+      const [logData, statData] = await Promise.all([
+        apiFetch<{ logs: ErrorLogEntry[] }>(`/api/logs/errors?${params}`),
+        apiFetch<{ counts: Record<string, number> }>(
+          `/api/logs/errors/stats?hours=${hours}`,
+        ),
+      ]);
+      setLogs(logData.logs);
+      setStats(statData.counts);
+    } catch (err) {
+      console.error("Failed to fetch error logs:", err);
+    } finally {
+      setLoading(false);
+    }
+  }, [hours, category]);
+
+  useEffect(() => {
+    fetch_();
+  }, [fetch_]);
+
+  const filtered = filter
+    ? logs.filter(
+        (l) =>
+          l.message.toLowerCase().includes(filter.toLowerCase()) ||
+          l.category.toLowerCase().includes(filter.toLowerCase()),
+      )
+    : logs;
+
+  const statEntries = Object.entries(stats).sort((a, b) => b[1] - a[1]);
+
+  return (
+    <>
+      {/* Error stats summary */}
+      {statEntries.length > 0 && (
+        <div
+          style={{
+            display: "flex",
+            gap: 8,
+            flexWrap: "wrap",
+            marginBottom: 12,
+          }}
+        >
+          {statEntries.map(([cat, count]) => (
+            <div
+              key={cat}
+              onClick={() => setCategory(cat)}
+              style={{
+                ...S.card,
+                marginBottom: 0,
+                padding: "8px 14px",
+                cursor: "pointer",
+                display: "flex",
+                alignItems: "center",
+                gap: 8,
+                border:
+                  category === cat
+                    ? `1px solid ${C.error}`
+                    : `1px solid ${C.border}`,
+              }}
+            >
+              <span style={{ fontSize: 18, fontWeight: 700, color: C.error }}>
+                {count}
+              </span>
+              <span style={{ fontSize: 12, color: C.textDim }}>{cat}</span>
+            </div>
+          ))}
+        </div>
+      )}
+
+      <div
+        style={{
+          display: "flex",
+          gap: 12,
+          alignItems: "center",
+          flexWrap: "wrap",
+          marginBottom: 8,
+        }}
+      >
+        <TimeWindowPicker hours={hours} onChange={setHours} />
+        {category && (
+          <button
+            style={S.btnSmall}
+            onClick={() => setCategory("")}
+          >
+            ✕ {category}
+          </button>
+        )}
+        <input
+          value={filter}
+          onChange={(e) => setFilter(e.target.value)}
+          placeholder="Search..."
+          style={{ ...S.input, width: 180, fontSize: 12 }}
+        />
+        <button style={S.btnSmall} onClick={fetch_}>
+          {loading ? "Loading..." : "Refresh"}
+        </button>
+        <span style={{ fontSize: 11, color: C.textDim }}>
+          {filtered.length} errors
+        </span>
+      </div>
+
+      <div
+        style={{
+          flex: 1,
+          background: C.surface,
+          borderRadius: 6,
+          overflowY: "auto",
+          fontFamily: "monospace",
+          fontSize: 12,
+        }}
+      >
+        <table style={S.table}>
+          <thead>
+            <tr>
+              <th style={{ ...S.th, width: 140 }}>Time</th>
+              <th style={{ ...S.th, width: 90 }}>Category</th>
+              <th style={S.th}>Error</th>
+            </tr>
+          </thead>
+          <tbody>
+            {filtered.length === 0 ? (
+              <tr>
+                <td colSpan={3} style={{ ...S.td, color: C.textDim, textAlign: "center" }}>
+                  {loading ? "Loading..." : "No errors 🎉"}
+                </td>
+              </tr>
+            ) : (
+              filtered.map((entry) => (
+                <tr key={entry.id}>
+                  <td style={{ ...S.td, color: C.textDim, fontSize: 11 }}>
+                    {formatDateTime(entry.createdAt)}
+                  </td>
+                  <td style={{ ...S.td, fontSize: 11 }}>
+                    <span style={S.badge(C.error)}>{entry.category}</span>
+                  </td>
+                  <td style={{ ...S.td, whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
+                    <span style={{ color: C.error }}>{entry.message}</span>
+                    <ExpandableRow label="stack trace" content={entry.stack} />
+                    <ExpandableRow label="metadata" content={entry.metadata} />
+                  </td>
+                </tr>
+              ))
+            )}
+          </tbody>
+        </table>
+      </div>
+    </>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Tool Calls Tab
+// ---------------------------------------------------------------------------
+
+function ToolCallsTab() {
+  const [logs, setLogs] = useState<ToolCallEntry[]>([]);
+  const [stats, setStats] = useState<ToolStat[]>([]);
+  const [hours, setHours] = useState(24);
+  const [tool, setTool] = useState("");
+  const [showFailed, setShowFailed] = useState(false);
+  const [filter, setFilter] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [view, setView] = useState<"list" | "stats">("stats");
+
+  const fetch_ = useCallback(async () => {
+    setLoading(true);
+    try {
+      const params = new URLSearchParams({ hours: String(hours), limit: "500" });
+      if (tool) params.set("tool", tool);
+      if (showFailed) params.set("failed", "true");
+
+      const [logData, statData] = await Promise.all([
+        apiFetch<{ logs: ToolCallEntry[] }>(`/api/logs/tools?${params}`),
+        apiFetch<{ stats: ToolStat[] }>(
+          `/api/logs/tools/stats?hours=${hours}`,
+        ),
+      ]);
+      setLogs(logData.logs);
+      setStats(statData.stats);
+    } catch (err) {
+      console.error("Failed to fetch tool logs:", err);
+    } finally {
+      setLoading(false);
+    }
+  }, [hours, tool, showFailed]);
+
+  useEffect(() => {
+    fetch_();
+  }, [fetch_]);
+
+  const filtered = filter
+    ? logs.filter(
+        (l) =>
+          l.tool.toLowerCase().includes(filter.toLowerCase()) ||
+          (l.input && l.input.toLowerCase().includes(filter.toLowerCase())),
+      )
+    : logs;
+
+  const totalCalls = stats.reduce((s, t) => s + t.totalCalls, 0);
+  const totalFailures = stats.reduce((s, t) => s + t.failures, 0);
+
+  return (
+    <>
+      {/* Stats overview */}
+      <div
+        style={{
+          display: "flex",
+          gap: 12,
+          marginBottom: 12,
+          flexWrap: "wrap",
+          alignItems: "center",
+        }}
+      >
+        <div style={{ ...S.card, marginBottom: 0, padding: "8px 14px" }}>
+          <div style={{ fontSize: 20, fontWeight: 700, color: C.text }}>
+            {totalCalls}
+          </div>
+          <div style={{ fontSize: 11, color: C.textDim }}>Total calls</div>
+        </div>
+        <div style={{ ...S.card, marginBottom: 0, padding: "8px 14px" }}>
+          <div
+            style={{
+              fontSize: 20,
+              fontWeight: 700,
+              color: totalFailures > 0 ? C.error : C.success,
+            }}
+          >
+            {totalFailures}
+          </div>
+          <div style={{ fontSize: 11, color: C.textDim }}>Failures</div>
+        </div>
+        <div style={{ ...S.card, marginBottom: 0, padding: "8px 14px" }}>
+          <div style={{ fontSize: 20, fontWeight: 700, color: C.text }}>
+            {stats.length}
+          </div>
+          <div style={{ fontSize: 11, color: C.textDim }}>Unique tools</div>
+        </div>
+
+        <div style={{ flex: 1 }} />
+
+        <div style={{ display: "flex", gap: 4 }}>
+          <button
+            style={{
+              ...S.btnSmall,
+              background: view === "stats" ? C.accent : C.primary,
+              color: view === "stats" ? "#fff" : C.textDim,
+            }}
+            onClick={() => setView("stats")}
+          >
+            Stats
+          </button>
+          <button
+            style={{
+              ...S.btnSmall,
+              background: view === "list" ? C.accent : C.primary,
+              color: view === "list" ? "#fff" : C.textDim,
+            }}
+            onClick={() => setView("list")}
+          >
+            List
+          </button>
+        </div>
+      </div>
+
+      <div
+        style={{
+          display: "flex",
+          gap: 12,
+          alignItems: "center",
+          flexWrap: "wrap",
+          marginBottom: 8,
+        }}
+      >
+        <TimeWindowPicker hours={hours} onChange={setHours} />
+        {tool && (
+          <button style={S.btnSmall} onClick={() => setTool("")}>
+            ✕ {tool}
+          </button>
+        )}
+        <label
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 4,
+            fontSize: 12,
+            color: C.textDim,
+            cursor: "pointer",
+          }}
+        >
+          <input
+            type="checkbox"
+            checked={showFailed}
+            onChange={(e) => setShowFailed(e.target.checked)}
+          />
+          Failed only
+        </label>
+        <input
+          value={filter}
+          onChange={(e) => setFilter(e.target.value)}
+          placeholder="Search..."
+          style={{ ...S.input, width: 180, fontSize: 12 }}
+        />
+        <button style={S.btnSmall} onClick={fetch_}>
+          {loading ? "Loading..." : "Refresh"}
+        </button>
+      </div>
+
+      <div
+        style={{
+          flex: 1,
+          background: C.surface,
+          borderRadius: 6,
+          overflowY: "auto",
+          fontFamily: "monospace",
+          fontSize: 12,
+        }}
+      >
+        {view === "stats" ? (
+          <table style={S.table}>
+            <thead>
+              <tr>
+                <th style={S.th}>Tool</th>
+                <th style={{ ...S.th, width: 80, textAlign: "right" }}>Calls</th>
+                <th style={{ ...S.th, width: 80, textAlign: "right" }}>Failures</th>
+                <th style={{ ...S.th, width: 100, textAlign: "right" }}>Fail Rate</th>
+                <th style={{ ...S.th, width: 100, textAlign: "right" }}>Avg (ms)</th>
+                <th style={{ ...S.th, width: 100, textAlign: "right" }}>Max (ms)</th>
+              </tr>
+            </thead>
+            <tbody>
+              {stats.length === 0 ? (
+                <tr>
+                  <td colSpan={6} style={{ ...S.td, color: C.textDim, textAlign: "center" }}>
+                    {loading ? "Loading..." : "No tool calls in this window"}
+                  </td>
+                </tr>
+              ) : (
+                stats.map((stat) => {
+                  const failRate =
+                    stat.totalCalls > 0
+                      ? ((stat.failures / stat.totalCalls) * 100).toFixed(1)
+                      : "0.0";
+                  return (
+                    <tr
+                      key={stat.tool}
+                      onClick={() => {
+                        setTool(stat.tool);
+                        setView("list");
+                      }}
+                      style={{ cursor: "pointer" }}
+                    >
+                      <td style={{ ...S.td, fontWeight: 600 }}>{stat.tool}</td>
+                      <td style={{ ...S.td, textAlign: "right" }}>
+                        {stat.totalCalls}
+                      </td>
+                      <td
+                        style={{
+                          ...S.td,
+                          textAlign: "right",
+                          color: stat.failures > 0 ? C.error : C.textDim,
+                        }}
+                      >
+                        {stat.failures}
+                      </td>
+                      <td
+                        style={{
+                          ...S.td,
+                          textAlign: "right",
+                          color:
+                            parseFloat(failRate) > 10 ? C.error : C.textDim,
+                        }}
+                      >
+                        {failRate}%
+                      </td>
+                      <td
+                        style={{
+                          ...S.td,
+                          textAlign: "right",
+                          color:
+                            stat.avgDurationMs > 5000 ? C.warning : C.textDim,
+                        }}
+                      >
+                        {stat.avgDurationMs.toLocaleString()}
+                      </td>
+                      <td
+                        style={{
+                          ...S.td,
+                          textAlign: "right",
+                          color:
+                            stat.maxDurationMs > 10000 ? C.warning : C.textDim,
+                        }}
+                      >
+                        {stat.maxDurationMs.toLocaleString()}
+                      </td>
+                    </tr>
+                  );
+                })
+              )}
+            </tbody>
+          </table>
+        ) : (
+          <table style={S.table}>
+            <thead>
+              <tr>
+                <th style={{ ...S.th, width: 140 }}>Time</th>
+                <th style={{ ...S.th, width: 140 }}>Tool</th>
+                <th style={{ ...S.th, width: 70, textAlign: "right" }}>
+                  Duration
+                </th>
+                <th style={{ ...S.th, width: 60 }}>Status</th>
+                <th style={S.th}>Details</th>
+              </tr>
+            </thead>
+            <tbody>
+              {filtered.length === 0 ? (
+                <tr>
+                  <td colSpan={5} style={{ ...S.td, color: C.textDim, textAlign: "center" }}>
+                    {loading ? "Loading..." : "No tool calls found"}
+                  </td>
+                </tr>
+              ) : (
+                filtered.map((entry) => (
+                  <tr key={entry.id}>
+                    <td style={{ ...S.td, color: C.textDim, fontSize: 11 }}>
+                      {formatDateTime(entry.createdAt)}
+                    </td>
+                    <td style={{ ...S.td, fontWeight: 600 }}>
+                      <span
+                        style={{ cursor: "pointer" }}
+                        onClick={() => setTool(entry.tool)}
+                      >
+                        {entry.tool}
+                      </span>
+                      {entry.context && (
+                        <span
+                          style={{
+                            marginLeft: 6,
+                            fontSize: 10,
+                            color: C.textDim,
+                            fontWeight: 400,
+                          }}
+                        >
+                          ({entry.context})
+                        </span>
+                      )}
+                    </td>
+                    <td
+                      style={{
+                        ...S.td,
+                        textAlign: "right",
+                        color:
+                          entry.durationMs > 5000 ? C.warning : C.textDim,
+                      }}
+                    >
+                      {entry.durationMs.toLocaleString()}ms
+                    </td>
+                    <td style={S.td}>
+                      <span
+                        style={S.badge(entry.success ? C.success : C.error)}
+                      >
+                        {entry.success ? "OK" : "FAIL"}
+                      </span>
+                    </td>
+                    <td style={{ ...S.td, whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
+                      {entry.error && (
+                        <span style={{ color: C.error }}>{entry.error}</span>
+                      )}
+                      <ExpandableRow label="input" content={entry.input} />
+                      <ExpandableRow label="result" content={entry.result} />
+                    </td>
+                  </tr>
+                ))
+              )}
+            </tbody>
+          </table>
+        )}
+      </div>
+    </>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Main Logs Page
+// ---------------------------------------------------------------------------
+
+export default function Logs() {
+  const [tab, setTab] = useState<Tab>("live");
+
+  return (
+    <div
+      style={{
+        display: "flex",
+        flexDirection: "column",
+        height: "calc(100vh - 48px)",
+      }}
+    >
+      <div
+        style={{
+          display: "flex",
+          justifyContent: "space-between",
+          alignItems: "center",
+          marginBottom: 4,
+        }}
+      >
+        <h2 style={{ ...S.h2, marginBottom: 0 }}>Logs</h2>
+      </div>
+
+      <TabBar active={tab} onChange={setTab} />
+
+      {tab === "live" && <LiveTab />}
+      {tab === "app" && <AppLogsTab />}
+      {tab === "errors" && <ErrorsTab />}
+      {tab === "tools" && <ToolCallsTab />}
     </div>
   );
 }
