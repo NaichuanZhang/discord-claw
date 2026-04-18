@@ -16,6 +16,11 @@ import {
   updateEvolution,
   type Evolution,
 } from "./log.js";
+import {
+  runSandboxValidation,
+  isSandboxCIAvailable,
+  type SandboxValidationResult,
+} from "./sandbox.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -205,6 +210,38 @@ async function waitForMergeReady(prNumber: number): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
+// Local validation (fallback when Daytona is not available)
+// ---------------------------------------------------------------------------
+
+async function runLocalValidation(): Promise<void> {
+  // 1. Run typecheck in worktree
+  log("Running typecheck in worktree (local)...");
+  try {
+    await execFileAsync("npx", ["tsc", "--noEmit"], {
+      cwd: BETA_DIR,
+      timeout: 60_000,
+      maxBuffer: 1024 * 1024,
+    });
+  } catch (err: any) {
+    const output = (err.stdout || "") + "\n" + (err.stderr || "");
+    throw new Error(`Typecheck failed in worktree:\n${output.slice(0, 4000)}`);
+  }
+
+  // 2. Run integration tests in worktree
+  log("Running integration tests in worktree (local)...");
+  try {
+    await execFileAsync("npx", ["vitest", "run"], {
+      cwd: BETA_DIR,
+      timeout: 120_000,
+      maxBuffer: 1024 * 1024,
+    });
+  } catch (err: any) {
+    const output = (err.stdout || "") + "\n" + (err.stderr || "");
+    throw new Error(`Integration tests failed in worktree:\n${output.slice(0, 4000)}`);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Engine functions
 // ---------------------------------------------------------------------------
 
@@ -267,7 +304,16 @@ export async function startEvolution(opts: {
 }
 
 /**
- * Finalize an evolution: typecheck, run tests, commit, push, create PR.
+ * Finalize an evolution: commit, push, validate (sandbox or local), create PR.
+ *
+ * Flow:
+ *   1. Run local typecheck as a fast pre-flight (catches obvious errors quickly)
+ *   2. Stage + commit + push the branch
+ *   3. If Daytona is available: run full validation in an ephemeral sandbox
+ *      (clean install, typecheck, tests — true isolation)
+ *   4. If Daytona is not available: run tests locally in worktree as fallback
+ *   5. Create the PR with quality gate results
+ *   6. Clean up worktree
  */
 export async function finalizeEvolution(opts: {
   id: string;
@@ -283,8 +329,10 @@ export async function finalizeEvolution(opts: {
     throw new Error("beta/ worktree does not exist");
   }
 
-  // 1. Run typecheck in worktree
-  log("Running typecheck in worktree...");
+  // ---------------------------------------------------------------------------
+  // 1. Local pre-flight typecheck (fast, catches syntax errors before pushing)
+  // ---------------------------------------------------------------------------
+  log("Running local pre-flight typecheck...");
   try {
     await execFileAsync("npx", ["tsc", "--noEmit"], {
       cwd: BETA_DIR,
@@ -293,23 +341,13 @@ export async function finalizeEvolution(opts: {
     });
   } catch (err: any) {
     const output = (err.stdout || "") + "\n" + (err.stderr || "");
-    throw new Error(`Typecheck failed in worktree:\n${output.slice(0, 4000)}`);
+    throw new Error(`Typecheck failed (pre-flight):\n${output.slice(0, 4000)}`);
   }
+  log("Pre-flight typecheck passed");
 
-  // 2. Run integration tests in worktree
-  log("Running integration tests in worktree...");
-  try {
-    await execFileAsync("npx", ["vitest", "run"], {
-      cwd: BETA_DIR,
-      timeout: 120_000,
-      maxBuffer: 1024 * 1024,
-    });
-  } catch (err: any) {
-    const output = (err.stdout || "") + "\n" + (err.stderr || "");
-    throw new Error(`Integration tests failed in worktree:\n${output.slice(0, 4000)}`);
-  }
-
-  // 3. Stage and commit all changes
+  // ---------------------------------------------------------------------------
+  // 2. Stage, commit, push
+  // ---------------------------------------------------------------------------
   await git(["add", "-A"], { cwd: BETA_DIR });
 
   const { stdout: diffOutput } = await git(
@@ -329,13 +367,78 @@ export async function finalizeEvolution(opts: {
     { cwd: BETA_DIR },
   );
 
-  // 4. Push branch
   log(`Pushing branch ${evolution.branch}...`);
   await git(["push", "-u", "origin", evolution.branch!], { cwd: BETA_DIR });
 
-  // 5. Create PR via gh CLI
+  // ---------------------------------------------------------------------------
+  // 3. Validate: Daytona sandbox (preferred) or local fallback
+  // ---------------------------------------------------------------------------
+  let validationMethod: "sandbox" | "local";
+  let sandboxResult: SandboxValidationResult | null = null;
+
+  if (isSandboxCIAvailable()) {
+    validationMethod = "sandbox";
+    log("Daytona sandbox CI available — running isolated validation...");
+
+    try {
+      sandboxResult = await runSandboxValidation({
+        branch: evolution.branch!,
+        onLog: (line) => log(`[sandbox] ${line}`),
+      });
+
+      if (!sandboxResult.success) {
+        const errors: string[] = [];
+        if (!sandboxResult.typecheckPassed) {
+          errors.push(`**Typecheck failed:**\n\`\`\`\n${sandboxResult.typecheckOutput.slice(0, 2000)}\n\`\`\``);
+        }
+        if (!sandboxResult.testsPassed) {
+          errors.push(`**Tests failed:**\n\`\`\`\n${sandboxResult.testsOutput.slice(0, 2000)}\n\`\`\``);
+        }
+        throw new Error(
+          `Sandbox validation failed (${Math.round(sandboxResult.durationMs / 1000)}s):\n${errors.join("\n\n")}`,
+        );
+      }
+
+      log(`Sandbox validation passed in ${Math.round(sandboxResult.durationMs / 1000)}s`);
+    } catch (err: any) {
+      // If the error is a validation failure (tests/typecheck failed), re-throw it
+      if (err.message?.includes("Sandbox validation failed")) {
+        throw err;
+      }
+      // If sandbox infrastructure failed (API down, timeout, etc.), fall back to local
+      log(`Sandbox CI infrastructure error, falling back to local: ${err.message}`);
+      validationMethod = "local";
+      await runLocalValidation();
+      log("Local fallback validation passed");
+    }
+  } else {
+    validationMethod = "local";
+    log("Daytona not configured — running local validation...");
+    await runLocalValidation();
+    log("Local validation passed");
+  }
+
+  // ---------------------------------------------------------------------------
+  // 4. Create PR
+  // ---------------------------------------------------------------------------
   log("Creating PR...");
   const migrationFiles = filesChanged.filter((f) => f.startsWith("migrations/"));
+
+  const qualityGates = validationMethod === "sandbox" && sandboxResult
+    ? [
+        "### Quality Gates (Daytona Sandbox CI ☁️)",
+        `- ✅ Pre-flight typecheck passed (local)`,
+        `- ✅ TypeScript typecheck passed (sandbox)`,
+        `- ✅ Integration tests passed (sandbox)`,
+        `- ⏱️ Sandbox validation: ${Math.round(sandboxResult.durationMs / 1000)}s`,
+        sandboxResult.sandboxId ? `- 🆔 Sandbox: \`${sandboxResult.sandboxId}\`` : "",
+      ].filter(Boolean)
+    : [
+        "### Quality Gates (Local)",
+        "- ✅ TypeScript typecheck passed",
+        "- ✅ Integration tests passed",
+      ];
+
   const prBody = [
     `## Evolution: ${opts.summary}`,
     "",
@@ -350,9 +453,7 @@ export async function finalizeEvolution(opts: {
       ? migrationFiles.map((f) => `- \`${f}\``).join("\n")
       : "None",
     "",
-    "### Quality Gates",
-    "- ✅ TypeScript typecheck passed",
-    "- ✅ Integration tests passed",
+    ...qualityGates,
     "",
     "---",
     "*This PR was created by the Evolution Engine.*",
@@ -376,7 +477,9 @@ export async function finalizeEvolution(opts: {
   const prNumberMatch = prUrl.match(/\/pull\/(\d+)/);
   const prNumber = prNumberMatch ? parseInt(prNumberMatch[1], 10) : 0;
 
-  // 6. Update evolution record
+  // ---------------------------------------------------------------------------
+  // 5. Update evolution record
+  // ---------------------------------------------------------------------------
   updateEvolution(opts.id, {
     status: "proposed",
     prUrl,
@@ -386,16 +489,21 @@ export async function finalizeEvolution(opts: {
     proposedAt: Date.now(),
   });
 
-  // 7. Clean up worktree
+  // ---------------------------------------------------------------------------
+  // 6. Clean up worktree
+  // ---------------------------------------------------------------------------
   log("Cleaning up worktree...");
   await git(["worktree", "remove", "beta", "--force"]);
 
-  // 8. Notify Discord
+  // ---------------------------------------------------------------------------
+  // 7. Notify Discord
+  // ---------------------------------------------------------------------------
   if (_sendToDiscord && opts.channelId) {
     try {
+      const ciLabel = validationMethod === "sandbox" ? "☁️ sandbox CI" : "🖥️ local CI";
       await _sendToDiscord(
         opts.channelId,
-        `I've created a PR for this: ${prUrl}\n**${opts.summary}** (${filesChanged.length} files changed)`,
+        `I've created a PR for this: ${prUrl}\n**${opts.summary}** (${filesChanged.length} files changed, validated via ${ciLabel})`,
       );
     } catch (err) {
       log("Failed to send Discord notification:", err);

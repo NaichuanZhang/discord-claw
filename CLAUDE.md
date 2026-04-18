@@ -29,7 +29,7 @@ Integration tests live in `tests/integration/` and use **vitest**. They validate
 - **Image extraction**: Pure function — markdown parsing for URL/file images
 - **Tool registration**: All tool arrays export correctly with unique names
 
-Tests run automatically as a quality gate in the evolution engine — `finalizeEvolution()` runs both `tsc --noEmit` and `vitest run` (120s timeout) before allowing a PR to be created. If either fails, the PR is blocked.
+Tests run automatically as a quality gate in the evolution engine — `finalizeEvolution()` runs both `tsc --noEmit` and `vitest run` before allowing a PR to be created. If either fails, the PR is blocked.
 
 To add new tests, create files matching `tests/**/*.test.ts`.
 
@@ -97,19 +97,23 @@ Scheduled tasks in `data/cron/jobs.json` (gitignored; seed file tracked). Three 
 
 ### Evolution Engine
 
-Self-modification via GitHub PRs. `src/evolution/engine.ts` manages git worktrees at `beta/`, runs typecheck and integration tests, pushes branches, creates PRs via `gh` CLI. Evolution status flow: `idea` → `proposing` → `proposed` (PR open) → `deployed` (merged). Also: `cancelled`, `rejected`, `rolled_back`. On startup, `syncDeployedEvolutions()` checks if proposed PRs were merged. `evolve_merge` merges the PR, posts a deployment notification thread to a configured channel, and triggers restart.
+Self-modification via GitHub PRs. `src/evolution/engine.ts` manages git worktrees at `beta/`, runs validation, pushes branches, creates PRs via `gh` CLI. Evolution status flow: `idea` → `proposing` → `proposed` (PR open) → `deployed` (merged). Also: `cancelled`, `rejected`, `rolled_back`. On startup, `syncDeployedEvolutions()` checks if proposed PRs were merged. `evolve_merge` merges the PR, posts a deployment notification thread to a configured channel, and triggers restart.
 
 **Quality gates in `finalizeEvolution()`:**
-1. `tsc --noEmit` — TypeScript typecheck (60s timeout)
-2. `vitest run` — Integration tests (120s timeout)
-3. Both must pass before the PR is created
+1. Local pre-flight `tsc --noEmit` (fast, catches syntax errors before pushing)
+2. Commit + push branch to GitHub
+3. **Daytona Sandbox CI** (preferred): Spins up an ephemeral sandbox via `@daytona/sdk`, clones the branch, runs `npm ci`, `tsc --noEmit`, and `vitest run` in full isolation. See `src/evolution/sandbox.ts`.
+4. **Local fallback**: If `DAYTONA_API_KEY` is not set or sandbox infrastructure fails, falls back to running typecheck + tests in the local worktree (symlinked `node_modules`).
+5. Both typecheck and tests must pass before the PR is created.
+
+The sandbox approach provides true CI isolation — clean `npm ci` install, no symlinked `node_modules`, no interference with the running bot.
 
 ### Structured Logging
 
 `src/logging/` provides a lightweight structured logging system with three SQLite-backed log streams:
 
 | Table | Purpose | Retention |
-|-------|---------|-----------|
+|-------|---------|-----------| 
 | `application_log` | General operational events (info, warn, debug) | 7 days |
 | `error_log` | Errors & exceptions with stack traces | 30 days |
 | `tool_call_log` | Every tool invocation with input, result, timing, success/failure | 7 days |
@@ -190,4 +194,4 @@ Skills are preferred over code when possible: they're cheaper, safer, instantly 
 
 `reference/` contains the upstream openclaw source (read-only) — useful for understanding original patterns when this fork diverges. It is not part of the build.
 
-Requires either `ANTHROPIC_API_KEY` or `ANTHROPIC_BASE_URL` + `ANTHROPIC_AUTH_TOKEN` (for proxy). `DISCORD_BOT_TOKEN` is always required. `OPENAI_API_KEY` is optional — enables voice message transcription via Whisper. `EIGENAI_API_KEY` is optional — enables voice assistant STT/TTS via EigenAI. `REFLECTION_CHANNEL_ID` is optional — sets the Discord channel where reflection daemon posts proposals. `GATEWAY_PORT` defaults to 3000. `GATEWAY_TOKEN` configures API auth (currently disabled). Voice tuning: `VOICE_MODEL` (supports `eigen:<model>` prefix for Eigen LLM), `VOICE_SILENCE_MS` (default 800), `VOICE_MIN_UTTERANCE_MS` (default 500), `VOICE_MAX_TOKENS` (default 512), `VOICE_DEBUG` (default on), `VOICE_TTS_STREAM` (default on), `VOICE_TOOLS_MODE` (`full` or `minimal`, default `full`). Reflection tuning: `REFLECTION_INTERVAL_HOURS`, `REFLECTION_LOOKBACK_HOURS`, `REFLECTION_MIN_SIGNALS` (default 3), `REFLECTION_MODEL`. mem9 cloud memory: configured via `data/skills/mem9/auth.json` (contains `api_key`), not via `.env`. See `.env.example`.
+Requires either `ANTHROPIC_API_KEY` or `ANTHROPIC_BASE_URL` + `ANTHROPIC_AUTH_TOKEN` (for proxy). `DISCORD_BOT_TOKEN` is always required. `OPENAI_API_KEY` is optional — enables voice message transcription via Whisper. `EIGENAI_API_KEY` is optional — enables voice assistant STT/TTS via EigenAI. `REFLECTION_CHANNEL_ID` is optional — sets the Discord channel where reflection daemon posts proposals. `GATEWAY_PORT` defaults to 3000. `GATEWAY_TOKEN` configures API auth (currently disabled). `DAYTONA_API_KEY` is optional — enables Daytona sandbox CI for evolution validation (falls back to local if not set). `DAYTONA_API_URL` defaults to `https://app.daytona.io/api`. Voice tuning: `VOICE_MODEL` (supports `eigen:<model>` prefix for Eigen LLM), `VOICE_SILENCE_MS` (default 800), `VOICE_MIN_UTTERANCE_MS` (default 500), `VOICE_MAX_TOKENS` (default 512), `VOICE_DEBUG` (default on), `VOICE_TTS_STREAM` (default on), `VOICE_TOOLS_MODE` (`full` or `minimal`, default `full`). Reflection tuning: `REFLECTION_INTERVAL_HOURS`, `REFLECTION_LOOKBACK_HOURS`, `REFLECTION_MIN_SIGNALS` (default 3), `REFLECTION_MODEL`. mem9 cloud memory: configured via `data/skills/mem9/auth.json` (contains `api_key`), not via `.env`. See `.env.example`.
