@@ -2,7 +2,7 @@ import Anthropic from "@anthropic-ai/sdk";
 import { anthropicClient } from "../shared/anthropic.js";
 import { conversationHistoryTools, handleConversationHistoryTool } from "../shared/conversation-history.js";
 import { getSoul } from "../soul/soul.js";
-import { memoryTools, handleMemoryTool } from "../memory/tools.js";
+import { getMemoryTools, handleMemoryTool } from "../memory/tools.js";
 import { discordTools, handleDiscordTool } from "./tools.js";
 import { skillTools, handleSkillTool } from "../skills/tools.js";
 import { dangerousTools, handleDangerousTool } from "./dangerous-tools.js";
@@ -171,25 +171,29 @@ When users ask what you've learned, what improvements you're thinking about, or 
 - Ideas (local only): \`bash\` → \`sqlite3 data/discordclaw.db "SELECT id, trigger_message FROM evolutions WHERE status='idea' ORDER BY created_at DESC LIMIT 10"\``;
 
 // ---------------------------------------------------------------------------
-// All tools combined
+// All tools combined (built dynamically to include mem9 tools when configured)
 // ---------------------------------------------------------------------------
 
-const allTools: Anthropic.Messages.Tool[] = [
-  ...conversationHistoryTools,
-  ...memoryTools,
-  ...discordTools,
-  ...skillTools,
-  ...dangerousTools,
-  ...evolutionTools,
-] as Anthropic.Messages.Tool[];
+function getAllTools(): Anthropic.Messages.Tool[] {
+  return [
+    ...conversationHistoryTools,
+    ...getMemoryTools(),
+    ...discordTools,
+    ...skillTools,
+    ...dangerousTools,
+    ...evolutionTools,
+  ] as Anthropic.Messages.Tool[];
+}
 
 /** Tools available in cron/agent-turn context (memory + discord + conversation history) */
-const cronTools: Anthropic.Messages.Tool[] = [
-  ...memoryTools,
-  ...discordTools,
-  ...conversationHistoryTools,
-  ...dangerousTools,
-] as Anthropic.Messages.Tool[];
+function getCronTools(): Anthropic.Messages.Tool[] {
+  return [
+    ...getMemoryTools(),
+    ...discordTools,
+    ...conversationHistoryTools,
+    ...dangerousTools,
+  ] as Anthropic.Messages.Tool[];
+}
 
 // ---------------------------------------------------------------------------
 // System prompt builder
@@ -277,6 +281,19 @@ function buildMessageHistory(
 }
 
 // ---------------------------------------------------------------------------
+// Memory tool name matching
+// ---------------------------------------------------------------------------
+
+/** All tool names that route to handleMemoryTool (local + mem9) */
+const MEMORY_TOOL_NAMES = new Set([
+  "memory_search",
+  "memory_get",
+  "mem9_store",
+  "mem9_update",
+  "mem9_delete",
+]);
+
+// ---------------------------------------------------------------------------
 // Tool dispatch
 // ---------------------------------------------------------------------------
 
@@ -287,9 +304,9 @@ async function executeTool(
 ): Promise<string> {
   let result: string;
 
-  // Memory tools are synchronous
-  if (name === "memory_search" || name === "memory_get") {
-    result = handleMemoryTool(name, input);
+  // Memory tools (async — queries local FTS5 + mem9 cloud in parallel)
+  if (MEMORY_TOOL_NAMES.has(name)) {
+    result = await handleMemoryTool(name, input);
   }
   // Discord tools are async
   else if (name === "send_message" || name === "send_file" || name === "add_reaction" || name === "get_channel_history" || name === "create_thread") {
@@ -425,6 +442,9 @@ export async function processMessage(opts: {
   let turns = 0;
   let totalUsage: TokenUsage | undefined;
   const model = getModel();
+
+  // Build tool list dynamically (includes mem9 tools when configured)
+  const allTools = getAllTools();
 
   // Duplicate tool call detection — track previous turn's calls
   let prevCallSignatures: string[] = [];
@@ -588,6 +608,9 @@ export async function processAgentTurn(opts: {
   const messages: Anthropic.Messages.MessageParam[] = [
     { role: "user", content: opts.message },
   ];
+
+  // Build cron tools dynamically (includes mem9 tools when configured)
+  const cronTools = getCronTools();
 
   const collectedText: string[] = [];
   let turns = 0;

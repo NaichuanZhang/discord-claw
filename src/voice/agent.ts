@@ -20,7 +20,7 @@ import Anthropic from "@anthropic-ai/sdk";
 import { anthropicClient } from "../shared/anthropic.js";
 import { conversationHistoryTools, handleConversationHistoryTool } from "../shared/conversation-history.js";
 import { getSoul } from "../soul/soul.js";
-import { memoryTools, handleMemoryTool } from "../memory/tools.js";
+import { getMemoryTools, handleMemoryTool } from "../memory/tools.js";
 import { discordTools, handleDiscordTool } from "../agent/tools.js";
 import { skillTools, handleSkillTool } from "../skills/tools.js";
 import { dangerousTools, handleDangerousTool } from "../agent/dangerous-tools.js";
@@ -79,27 +79,43 @@ const EIGEN_VOICE_SYSTEM_PROMPT = `You are a voice assistant. Respond in 1-3 sho
 No markdown, no lists, no emojis, no URLs. Speak naturally like a friend. Use contractions. Be concise.`;
 
 // ---------------------------------------------------------------------------
-// Voice tools — everything except evolution (Anthropic path only)
+// Voice tools — everything except evolution (built dynamically for mem9)
 // ---------------------------------------------------------------------------
 
-const fullVoiceTools: Anthropic.Messages.Tool[] = [
-  ...conversationHistoryTools,
-  ...memoryTools,
-  ...discordTools,
-  ...skillTools,
-  ...dangerousTools,
-] as Anthropic.Messages.Tool[];
+function getFullVoiceTools(): Anthropic.Messages.Tool[] {
+  return [
+    ...conversationHistoryTools,
+    ...getMemoryTools(),
+    ...discordTools,
+    ...skillTools,
+    ...dangerousTools,
+  ] as Anthropic.Messages.Tool[];
+}
 
-const minimalVoiceTools: Anthropic.Messages.Tool[] = [
-  ...conversationHistoryTools,
-  ...memoryTools,
-] as Anthropic.Messages.Tool[];
+function getMinimalVoiceTools(): Anthropic.Messages.Tool[] {
+  return [
+    ...conversationHistoryTools,
+    ...getMemoryTools(),
+  ] as Anthropic.Messages.Tool[];
+}
 
 const VOICE_TOOLS_MODE = process.env.VOICE_TOOLS_MODE || "full";
 
 function getVoiceTools(): Anthropic.Messages.Tool[] {
-  return VOICE_TOOLS_MODE === "minimal" ? minimalVoiceTools : fullVoiceTools;
+  return VOICE_TOOLS_MODE === "minimal" ? getMinimalVoiceTools() : getFullVoiceTools();
 }
+
+// ---------------------------------------------------------------------------
+// Memory tool name matching (shared with agent.ts)
+// ---------------------------------------------------------------------------
+
+const MEMORY_TOOL_NAMES = new Set([
+  "memory_search",
+  "memory_get",
+  "mem9_store",
+  "mem9_update",
+  "mem9_delete",
+]);
 
 // ---------------------------------------------------------------------------
 // Tool dispatch
@@ -109,9 +125,9 @@ async function executeVoiceTool(
   name: string,
   input: Record<string, unknown>,
 ): Promise<string> {
-  // Memory tools (sync)
-  if (name === "memory_search" || name === "memory_get") {
-    return handleMemoryTool(name, input);
+  // Memory tools (async — local FTS5 + mem9 cloud)
+  if (MEMORY_TOOL_NAMES.has(name)) {
+    return await handleMemoryTool(name, input);
   }
   // Discord tools (async)
   if (
