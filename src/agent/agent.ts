@@ -1,4 +1,5 @@
 import Anthropic from "@anthropic-ai/sdk";
+import { APIError, RateLimitError, APIConnectionError } from "@anthropic-ai/sdk";
 import { anthropicClient } from "../shared/anthropic.js";
 import { conversationHistoryTools, handleConversationHistoryTool } from "../shared/conversation-history.js";
 import { getSoul } from "../soul/soul.js";
@@ -77,6 +78,69 @@ function cleanModelName(s: string): string {
 function getModel(override?: string): string {
   const raw = override || process.env.ANTHROPIC_MODEL || DEFAULT_MODEL;
   return cleanModelName(raw);
+}
+
+// ---------------------------------------------------------------------------
+// API error handling helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Format an Anthropic API error into a user-friendly message.
+ * Logs detailed error info (including request_id) for debugging.
+ */
+function handleApiError(err: unknown, context: string): string {
+  if (err instanceof RateLimitError) {
+    log.error(`${context}: Rate limited (429)`, {
+      status: err.status,
+      requestId: err.request_id,
+    });
+    return "I'm being rate-limited by the AI provider right now. Please try again in a moment.";
+  }
+
+  if (err instanceof APIConnectionError) {
+    log.error(`${context}: Connection error`, {
+      message: err.message,
+    });
+    return "I couldn't connect to the AI provider. This is usually temporary — please try again.";
+  }
+
+  if (err instanceof APIError) {
+    log.error(`${context}: API error ${err.status}`, {
+      status: err.status,
+      message: err.message,
+      requestId: err.request_id,
+    });
+
+    if (err.status === 401 || err.status === 403) {
+      return "Authentication error with the AI provider. Please check the API key configuration.";
+    }
+    if (err.status === 529) {
+      return "The AI provider is currently overloaded. Please try again in a few minutes.";
+    }
+    if (err.status && err.status >= 500) {
+      return "The AI provider is experiencing issues. Please try again shortly.";
+    }
+
+    return `AI provider error (${err.status}): ${err.message}`;
+  }
+
+  // Unknown error — re-throw
+  throw err;
+}
+
+/**
+ * Log response metadata including request_id for debugging.
+ * The SDK attaches _request_id to all response objects via WithRequestID<T>.
+ */
+function logResponseMeta(response: Anthropic.Messages.Message, turn: number): void {
+  const requestId = (response as Anthropic.Messages.Message & { _request_id?: string | null })._request_id;
+  log.debug(`API response turn=${turn}`, {
+    model: response.model,
+    stopReason: response.stop_reason,
+    requestId: requestId || undefined,
+    inputTokens: response.usage.input_tokens,
+    outputTokens: response.usage.output_tokens,
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -505,13 +569,22 @@ export async function processMessage(opts: {
   while (true) {
     turns++;
 
-    const response = await anthropicClient.messages.create({
-      model,
-      max_tokens: MAX_TOKENS,
-      system: systemPrompt,
-      messages,
-      tools: allTools,
-    });
+    let response: Anthropic.Messages.Message;
+    try {
+      response = await anthropicClient.messages.create({
+        model,
+        max_tokens: MAX_TOKENS,
+        system: systemPrompt,
+        messages,
+        tools: allTools,
+      });
+    } catch (err) {
+      const userMessage = handleApiError(err, `processMessage turn ${turns}`);
+      return { text: userMessage, images: [], usage: totalUsage };
+    }
+
+    // Log response metadata (including request_id for debugging)
+    logResponseMeta(response, turns);
 
     // Aggregate token usage
     totalUsage = aggregateUsage(totalUsage, response, response.model);
@@ -578,21 +651,27 @@ export async function processMessage(opts: {
         content:
           "[System: You have called the same tools with identical inputs multiple times. Stop calling tools and produce your final response now using the information you already have.]",
       });
+
       // One final turn without tools to force a text response
-      const final = await anthropicClient.messages.create({
-        model,
-        max_tokens: MAX_TOKENS,
-        system: systemPrompt,
-        messages,
-      });
+      try {
+        const final = await anthropicClient.messages.create({
+          model,
+          max_tokens: MAX_TOKENS,
+          system: systemPrompt,
+          messages,
+        });
 
-      // Aggregate usage from the final call too
-      totalUsage = aggregateUsage(totalUsage, final, final.model);
+        logResponseMeta(final, turns + 1);
+        totalUsage = aggregateUsage(totalUsage, final, final.model);
 
-      for (const block of final.content) {
-        if (block.type === "text") {
-          collectedText.push(block.text);
+        for (const block of final.content) {
+          if (block.type === "text") {
+            collectedText.push(block.text);
+          }
         }
+      } catch (err) {
+        const userMessage = handleApiError(err, "processMessage dupe-break final turn");
+        collectedText.push(userMessage);
       }
       break;
     }
@@ -702,13 +781,22 @@ export async function processAgentTurn(opts: {
   while (true) {
     turns++;
 
-    const response = await anthropicClient.messages.create({
-      model: getModel(opts.model),
-      max_tokens: MAX_TOKENS,
-      system: systemPrompt,
-      messages,
-      tools: cronTools,
-    });
+    let response: Anthropic.Messages.Message;
+    try {
+      response = await anthropicClient.messages.create({
+        model: getModel(opts.model),
+        max_tokens: MAX_TOKENS,
+        system: systemPrompt,
+        messages,
+        tools: cronTools,
+      });
+    } catch (err) {
+      const errMsg = handleApiError(err, `processAgentTurn turn ${turns}`);
+      collectedText.push(errMsg);
+      break;
+    }
+
+    logResponseMeta(response, turns);
 
     for (const block of response.content) {
       if (block.type === "text") {
@@ -749,16 +837,23 @@ export async function processAgentTurn(opts: {
         content:
           "[System: You have called the same tools with identical inputs multiple times. Stop calling tools and produce your final response now.]",
       });
-      const final = await anthropicClient.messages.create({
-        model: getModel(opts.model),
-        max_tokens: MAX_TOKENS,
-        system: systemPrompt,
-        messages,
-      });
-      for (const block of final.content) {
-        if (block.type === "text") {
-          collectedText.push(block.text);
+
+      try {
+        const final = await anthropicClient.messages.create({
+          model: getModel(opts.model),
+          max_tokens: MAX_TOKENS,
+          system: systemPrompt,
+          messages,
+        });
+        logResponseMeta(final, turns + 1);
+        for (const block of final.content) {
+          if (block.type === "text") {
+            collectedText.push(block.text);
+          }
         }
+      } catch (err) {
+        const errMsg = handleApiError(err, "processAgentTurn dupe-break final");
+        collectedText.push(errMsg);
       }
       break;
     }

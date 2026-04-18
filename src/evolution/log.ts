@@ -18,6 +18,8 @@ export type EvolutionStatus =
   | "cancelled"
   | "rejected";
 
+export type EvolutionMode = "local" | "daytona";
+
 export interface Evolution {
   id: string;
   triggeredBy: string | null;
@@ -28,6 +30,8 @@ export interface Evolution {
   status: EvolutionStatus;
   changesSummary: string | null;
   filesChanged: string[] | null;
+  sandboxId: string | null;
+  mode: EvolutionMode | null;
   createdAt: number;
   proposedAt: number | null;
   mergedAt: number | null;
@@ -51,6 +55,8 @@ function rowToEvolution(row: Record<string, unknown>): Evolution {
     filesChanged: row.files_changed
       ? (JSON.parse(row.files_changed as string) as string[])
       : null,
+    sandboxId: (row.sandbox_id as string) ?? null,
+    mode: (row.mode as EvolutionMode) ?? null,
     createdAt: row.created_at as number,
     proposedAt: (row.proposed_at as number) ?? null,
     mergedAt: (row.merged_at as number) ?? null,
@@ -67,6 +73,8 @@ export function createEvolution(opts: {
   triggerMessage?: string;
   branch?: string;
   status?: EvolutionStatus;
+  sandboxId?: string;
+  mode?: EvolutionMode;
 }): Evolution {
   const id = nanoid();
   const now = Date.now();
@@ -74,10 +82,19 @@ export function createEvolution(opts: {
 
   getDb()
     .prepare(
-      `INSERT INTO evolutions (id, triggered_by, trigger_message, branch, status, created_at)
-       VALUES (?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO evolutions (id, triggered_by, trigger_message, branch, status, sandbox_id, mode, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
     )
-    .run(id, opts.triggeredBy, opts.triggerMessage ?? null, opts.branch ?? null, status, now);
+    .run(
+      id,
+      opts.triggeredBy,
+      opts.triggerMessage ?? null,
+      opts.branch ?? null,
+      status,
+      opts.sandboxId ?? null,
+      opts.mode ?? null,
+      now,
+    );
 
   return {
     id,
@@ -89,6 +106,8 @@ export function createEvolution(opts: {
     status,
     changesSummary: null,
     filesChanged: null,
+    sandboxId: opts.sandboxId ?? null,
+    mode: opts.mode ?? null,
     createdAt: now,
     proposedAt: null,
     mergedAt: null,
@@ -145,6 +164,8 @@ export function updateEvolution(
     prNumber: number;
     changesSummary: string;
     filesChanged: string[];
+    sandboxId: string;
+    mode: EvolutionMode;
     proposedAt: number;
     mergedAt: number;
     deployedAt: number;
@@ -176,6 +197,14 @@ export function updateEvolution(
   if (fields.filesChanged !== undefined) {
     setClauses.push("files_changed = ?");
     params.push(JSON.stringify(fields.filesChanged));
+  }
+  if (fields.sandboxId !== undefined) {
+    setClauses.push("sandbox_id = ?");
+    params.push(fields.sandboxId);
+  }
+  if (fields.mode !== undefined) {
+    setClauses.push("mode = ?");
+    params.push(fields.mode);
   }
   if (fields.proposedAt !== undefined) {
     setClauses.push("proposed_at = ?");

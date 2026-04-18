@@ -1,6 +1,11 @@
 // ---------------------------------------------------------------------------
 // Evolution Engine — worktree lifecycle, git operations, PR creation
 // ---------------------------------------------------------------------------
+//
+// Supports two modes controlled by `evolution.sandbox` config:
+//   - "local" (default): git worktree at beta/
+//   - "daytona": ephemeral Daytona cloud sandbox
+// ---------------------------------------------------------------------------
 
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -16,6 +21,18 @@ import {
   updateEvolution,
   type Evolution,
 } from "./log.js";
+import {
+  isSandboxMode,
+  getEvolutionMode,
+  createSandbox,
+  destroySandbox,
+  sandboxExec,
+  sandboxReadFile,
+  sandboxWriteFile,
+  sandboxRunQualityGates,
+  sandboxCommitAndPush,
+  hasSandbox,
+} from "./sandbox.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -209,7 +226,9 @@ async function waitForMergeReady(prNumber: number): Promise<void> {
 // ---------------------------------------------------------------------------
 
 /**
- * Start a new evolution session. Creates a git worktree at beta/.
+ * Start a new evolution session.
+ * - In "local" mode: creates a git worktree at beta/.
+ * - In "daytona" mode: spins up an ephemeral Daytona sandbox.
  */
 export async function startEvolution(opts: {
   reason: string;
@@ -224,6 +243,27 @@ export async function startEvolution(opts: {
     );
   }
 
+  const mode = getEvolutionMode();
+  const slug = slugify(opts.reason);
+  const ts = Date.now();
+  const branch = `evolve/${slug}-${ts}`;
+
+  if (mode === "daytona") {
+    return startDaytonaSandbox({ ...opts, branch });
+  } else {
+    return startLocalWorktree({ ...opts, branch });
+  }
+}
+
+/**
+ * Start evolution in local worktree mode.
+ */
+async function startLocalWorktree(opts: {
+  reason: string;
+  triggeredBy: string;
+  channelId?: string;
+  branch: string;
+}): Promise<Evolution> {
   // Clean up orphaned worktree if it exists
   if (existsSync(BETA_DIR)) {
     log("Cleaning up orphaned beta/ worktree...");
@@ -234,22 +274,18 @@ export async function startEvolution(opts: {
     }
   }
 
-  // Create branch name
-  const slug = slugify(opts.reason);
-  const ts = Date.now();
-  const branch = `evolve/${slug}-${ts}`;
-
   // Create evolution record
   const evolution = createEvolution({
     triggeredBy: opts.triggeredBy,
     triggerMessage: opts.reason,
-    branch,
+    branch: opts.branch,
     status: "proposing",
+    mode: "local",
   });
 
   // Create worktree
-  log(`Creating worktree at beta/ on branch ${branch}`);
-  await git(["worktree", "add", "beta", "-b", branch]);
+  log(`Creating worktree at beta/ on branch ${opts.branch}`);
+  await git(["worktree", "add", "beta", "-b", opts.branch]);
 
   // Symlink node_modules so typecheck works in worktree
   const worktreeNodeModules = join(BETA_DIR, "node_modules");
@@ -262,12 +298,37 @@ export async function startEvolution(opts: {
     symlinkSync(mainNodeModules, worktreeNodeModules);
   }
 
-  log(`Evolution ${evolution.id} started on ${branch}`);
+  log(`Evolution ${evolution.id} started on ${opts.branch} (local mode)`);
+  return evolution;
+}
+
+/**
+ * Start evolution in Daytona sandbox mode.
+ */
+async function startDaytonaSandbox(opts: {
+  reason: string;
+  triggeredBy: string;
+  channelId?: string;
+  branch: string;
+}): Promise<Evolution> {
+  const session = await createSandbox({ branch: opts.branch });
+
+  const evolution = createEvolution({
+    triggeredBy: opts.triggeredBy,
+    triggerMessage: opts.reason,
+    branch: opts.branch,
+    status: "proposing",
+    sandboxId: session.sandboxId,
+    mode: "daytona",
+  });
+
+  log(`Evolution ${evolution.id} started on ${opts.branch} (daytona sandbox: ${session.sandboxId})`);
   return evolution;
 }
 
 /**
  * Finalize an evolution: typecheck, run tests, commit, push, create PR.
+ * Dispatches to local or sandbox path based on the evolution's mode.
  */
 export async function finalizeEvolution(opts: {
   id: string;
@@ -278,6 +339,26 @@ export async function finalizeEvolution(opts: {
   if (!evolution || evolution.status !== "proposing") {
     throw new Error(`No active evolution with id ${opts.id}`);
   }
+
+  const mode = evolution.mode ?? "local";
+
+  if (mode === "daytona") {
+    return finalizeDaytona({ ...opts, evolution });
+  } else {
+    return finalizeLocal({ ...opts, evolution });
+  }
+}
+
+/**
+ * Finalize evolution in local worktree mode.
+ */
+async function finalizeLocal(opts: {
+  id: string;
+  summary: string;
+  channelId?: string;
+  evolution: Evolution;
+}): Promise<{ prUrl: string; prNumber: number }> {
+  const { evolution } = opts;
 
   if (!existsSync(BETA_DIR)) {
     throw new Error("beta/ worktree does not exist");
@@ -333,14 +414,134 @@ export async function finalizeEvolution(opts: {
   log(`Pushing branch ${evolution.branch}...`);
   await git(["push", "-u", "origin", evolution.branch!], { cwd: BETA_DIR });
 
-  // 5. Create PR via gh CLI
+  // 5. Create PR
+  const result = await createPR({
+    evolution,
+    summary: opts.summary,
+    filesChanged,
+    qualityGateNotes: [
+      "- ✅ TypeScript typecheck passed",
+      "- ✅ Integration tests passed",
+    ],
+  });
+
+  // 6. Update evolution record
+  updateEvolution(opts.id, {
+    status: "proposed",
+    prUrl: result.prUrl,
+    prNumber: result.prNumber,
+    changesSummary: opts.summary,
+    filesChanged,
+    proposedAt: Date.now(),
+  });
+
+  // 7. Clean up worktree
+  log("Cleaning up worktree...");
+  await git(["worktree", "remove", "beta", "--force"]);
+
+  // 8. Notify Discord
+  await notifyProposed(opts.channelId, result.prUrl, opts.summary, filesChanged.length);
+
+  log(`Evolution ${opts.id} proposed: ${result.prUrl}`);
+  return result;
+}
+
+/**
+ * Finalize evolution in Daytona sandbox mode.
+ */
+async function finalizeDaytona(opts: {
+  id: string;
+  summary: string;
+  channelId?: string;
+  evolution: Evolution;
+}): Promise<{ prUrl: string; prNumber: number }> {
+  const { evolution } = opts;
+
+  if (!hasSandbox()) {
+    throw new Error(
+      "No active Daytona sandbox. The sandbox may have timed out. Cancel and start a new evolution.",
+    );
+  }
+
+  // 1. Run quality gates in sandbox
+  const gates = await sandboxRunQualityGates();
+
+  if (!gates.typecheck.passed) {
+    throw new Error(
+      `Typecheck failed in sandbox:\n${gates.typecheck.output.slice(0, 4000)}`,
+    );
+  }
+
+  if (!gates.tests.passed) {
+    throw new Error(
+      `Integration tests failed in sandbox:\n${gates.tests.output.slice(0, 4000)}`,
+    );
+  }
+
+  // 2. Commit and push from sandbox
+  const { filesChanged } = await sandboxCommitAndPush({
+    branch: evolution.branch!,
+    summary: opts.summary,
+  });
+
+  // 3. Create PR (via local gh CLI)
+  const qualityGateNotes = [
+    "- ✅ TypeScript typecheck passed (Daytona sandbox)",
+    "- ✅ Integration tests passed (Daytona sandbox)",
+    `- 🏗️ Sandbox ID: \`${evolution.sandboxId}\``,
+  ];
+
+  const result = await createPR({
+    evolution,
+    summary: opts.summary,
+    filesChanged,
+    qualityGateNotes,
+  });
+
+  // 4. Update evolution record
+  updateEvolution(opts.id, {
+    status: "proposed",
+    prUrl: result.prUrl,
+    prNumber: result.prNumber,
+    changesSummary: opts.summary,
+    filesChanged,
+    proposedAt: Date.now(),
+  });
+
+  // 5. Destroy sandbox
+  await destroySandbox();
+
+  // 6. Notify Discord
+  await notifyProposed(opts.channelId, result.prUrl, opts.summary, filesChanged.length);
+
+  log(`Evolution ${opts.id} proposed: ${result.prUrl}`);
+  return result;
+}
+
+// ---------------------------------------------------------------------------
+// Shared helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Create a GitHub PR via `gh` CLI.
+ */
+async function createPR(opts: {
+  evolution: Evolution;
+  summary: string;
+  filesChanged: string[];
+  qualityGateNotes: string[];
+}): Promise<{ prUrl: string; prNumber: number }> {
+  const { evolution, summary, filesChanged, qualityGateNotes } = opts;
+
   log("Creating PR...");
   const migrationFiles = filesChanged.filter((f) => f.startsWith("migrations/"));
+  const modeLabel = evolution.mode === "daytona" ? " (Daytona sandbox)" : " (local worktree)";
   const prBody = [
-    `## Evolution: ${opts.summary}`,
+    `## Evolution: ${summary}`,
     "",
     `**Triggered by:** <@${evolution.triggeredBy}>`,
     `**Reason:** ${evolution.triggerMessage}`,
+    `**Mode:** ${evolution.mode ?? "local"}${modeLabel}`,
     "",
     "### Changes",
     ...filesChanged.map((f) => `- \`${f}\``),
@@ -351,8 +552,7 @@ export async function finalizeEvolution(opts: {
       : "None",
     "",
     "### Quality Gates",
-    "- ✅ TypeScript typecheck passed",
-    "- ✅ Integration tests passed",
+    ...qualityGateNotes,
     "",
     "---",
     "*This PR was created by the Evolution Engine.*",
@@ -366,7 +566,7 @@ export async function finalizeEvolution(opts: {
     "--head",
     evolution.branch!,
     "--title",
-    `feat(evolution): ${opts.summary}`,
+    `feat(evolution): ${summary}`,
     "--body",
     prBody,
   ]);
@@ -376,38 +576,32 @@ export async function finalizeEvolution(opts: {
   const prNumberMatch = prUrl.match(/\/pull\/(\d+)/);
   const prNumber = prNumberMatch ? parseInt(prNumberMatch[1], 10) : 0;
 
-  // 6. Update evolution record
-  updateEvolution(opts.id, {
-    status: "proposed",
-    prUrl,
-    prNumber,
-    changesSummary: opts.summary,
-    filesChanged,
-    proposedAt: Date.now(),
-  });
+  return { prUrl, prNumber };
+}
 
-  // 7. Clean up worktree
-  log("Cleaning up worktree...");
-  await git(["worktree", "remove", "beta", "--force"]);
-
-  // 8. Notify Discord
-  if (_sendToDiscord && opts.channelId) {
+/**
+ * Notify Discord that a PR has been proposed.
+ */
+async function notifyProposed(
+  channelId: string | undefined,
+  prUrl: string,
+  summary: string,
+  fileCount: number,
+): Promise<void> {
+  if (_sendToDiscord && channelId) {
     try {
       await _sendToDiscord(
-        opts.channelId,
-        `I've created a PR for this: ${prUrl}\n**${opts.summary}** (${filesChanged.length} files changed)`,
+        channelId,
+        `I've created a PR for this: ${prUrl}\n**${summary}** (${fileCount} files changed)`,
       );
     } catch (err) {
       log("Failed to send Discord notification:", err);
     }
   }
-
-  log(`Evolution ${opts.id} proposed: ${prUrl}`);
-  return { prUrl, prNumber };
 }
 
 /**
- * Cancel an active evolution. Cleans up worktree and branch.
+ * Cancel an active evolution. Cleans up worktree/sandbox and branch.
  */
 export async function cancelEvolution(id: string): Promise<void> {
   const evolution = getEvolution(id);
@@ -415,12 +609,19 @@ export async function cancelEvolution(id: string): Promise<void> {
     throw new Error(`Evolution not found: ${id}`);
   }
 
-  // Remove worktree if it exists
-  if (existsSync(BETA_DIR)) {
-    try {
-      await git(["worktree", "remove", "beta", "--force"]);
-    } catch {
-      rmSync(BETA_DIR, { recursive: true, force: true });
+  const mode = evolution.mode ?? "local";
+
+  if (mode === "daytona") {
+    // Destroy sandbox
+    await destroySandbox();
+  } else {
+    // Remove worktree if it exists
+    if (existsSync(BETA_DIR)) {
+      try {
+        await git(["worktree", "remove", "beta", "--force"]);
+      } catch {
+        rmSync(BETA_DIR, { recursive: true, force: true });
+      }
     }
   }
 
@@ -496,6 +697,7 @@ export async function mergeEvolution(opts: {
         "",
         `**Summary:** ${summary}`,
         `**Triggered by:** <@${evolution.triggeredBy}>`,
+        `**Mode:** ${evolution.mode ?? "local"}`,
         `**Files changed:** ${filesChanged.length}`,
         ...(filesChanged.length > 0
           ? ["", ...filesChanged.map((f) => `- \`${f}\``)]
