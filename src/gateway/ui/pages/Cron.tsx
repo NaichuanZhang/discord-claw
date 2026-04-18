@@ -1,25 +1,95 @@
 import React, { useState, useEffect } from "react";
 import { apiFetch, relativeTime, C, S } from "../App";
 
+// ── Types (matching the real API / cron service shapes) ──────────────
+
+interface CronSchedule {
+  type: "at" | "every" | "cron";
+  expression?: string;
+  tz?: string;
+  timestamp?: number;
+  intervalMs?: number;
+}
+
+interface CronPayload {
+  kind: "systemEvent" | "agentTurn";
+  text?: string;
+  message?: string;
+  model?: string;
+}
+
+interface CronDelivery {
+  channelId: string;
+  mentionUser?: string;
+}
+
+interface CronJobState {
+  nextRunAtMs?: number;
+  lastRunAtMs?: number;
+  lastRunStatus?: "ok" | "error" | "skipped";
+  lastError?: string;
+  consecutiveErrors?: number;
+}
+
 interface CronJob {
   id: string;
   name: string;
-  schedule: string;
-  scheduleType?: string;
-  nextRun?: string;
-  lastStatus?: string;
-  lastRun?: string;
+  description?: string;
   enabled: boolean;
-  payload?: any;
-  channelId?: string;
-  message?: string;
+  deleteAfterRun?: boolean;
+  schedule: CronSchedule;
+  payload: CronPayload;
+  delivery?: CronDelivery;
+  state: CronJobState;
+  createdAt: number;
+  updatedAt: number;
 }
 
 interface CronRunEntry {
-  timestamp: string;
-  status: string;
+  jobId: string;
+  startedAt: number;
+  completedAt: number;
+  status: "ok" | "error" | "skipped";
   result?: string;
   error?: string;
+}
+
+// ── Helpers ──────────────────────────────────────────────────────────
+
+/** Format a CronSchedule object into a human-readable string. */
+function formatSchedule(schedule: CronSchedule): string {
+  switch (schedule.type) {
+    case "cron":
+      return schedule.expression ?? "???";
+    case "every": {
+      if (!schedule.intervalMs) return "???";
+      const ms = schedule.intervalMs;
+      if (ms < 60_000) return `${Math.round(ms / 1000)}s`;
+      if (ms < 3_600_000) return `${Math.round(ms / 60_000)}m`;
+      if (ms < 86_400_000) return `${+(ms / 3_600_000).toFixed(1)}h`;
+      return `${+(ms / 86_400_000).toFixed(1)}d`;
+    }
+    case "at":
+      return schedule.timestamp
+        ? new Date(schedule.timestamp).toLocaleString()
+        : "???";
+    default:
+      return JSON.stringify(schedule);
+  }
+}
+
+/** Format the schedule type label. */
+function scheduleTypeLabel(schedule: CronSchedule): string {
+  switch (schedule.type) {
+    case "cron":
+      return schedule.tz ? `cron · ${schedule.tz}` : "cron";
+    case "every":
+      return "interval";
+    case "at":
+      return "one-shot";
+    default:
+      return schedule.type;
+  }
 }
 
 // ── Create Job Form ──────────────────────────────────────────────────
@@ -238,10 +308,11 @@ function JobRow({
       });
   };
 
+  const lastStatus = job.state?.lastRunStatus;
   const statusColor =
-    job.lastStatus === "success"
+    lastStatus === "ok"
       ? C.success
-      : job.lastStatus === "error" || job.lastStatus === "failed"
+      : lastStatus === "error"
         ? C.error
         : C.textDim;
 
@@ -250,21 +321,26 @@ function JobRow({
       <tr>
         <td style={S.td}>
           <div style={{ fontWeight: 500 }}>{job.name}</div>
-        </td>
-        <td style={{ ...S.td, fontFamily: "monospace", fontSize: 12 }}>
-          {job.schedule}
-          {job.scheduleType && (
-            <span style={{ color: C.textDim, marginLeft: 6 }}>
-              ({job.scheduleType})
-            </span>
+          {job.description && (
+            <div style={{ fontSize: 11, color: C.textDim, marginTop: 2 }}>
+              {job.description}
+            </div>
           )}
         </td>
+        <td style={{ ...S.td, fontFamily: "monospace", fontSize: 12 }}>
+          {formatSchedule(job.schedule)}
+          <span style={{ color: C.textDim, marginLeft: 6 }}>
+            ({scheduleTypeLabel(job.schedule)})
+          </span>
+        </td>
         <td style={{ ...S.td, color: C.textDim, fontSize: 12 }}>
-          {job.nextRun ? relativeTime(job.nextRun) : "-"}
+          {job.state?.nextRunAtMs
+            ? relativeTime(new Date(job.state.nextRunAtMs).toISOString())
+            : "-"}
         </td>
         <td style={S.td}>
-          {job.lastStatus ? (
-            <span style={S.badge(statusColor)}>{job.lastStatus}</span>
+          {lastStatus ? (
+            <span style={S.badge(statusColor)}>{lastStatus}</span>
           ) : (
             <span style={{ color: C.textDim, fontSize: 12 }}>-</span>
           )}
@@ -341,7 +417,8 @@ function JobRow({
               <table style={{ ...S.table, fontSize: 12 }}>
                 <thead>
                   <tr>
-                    <th style={S.th}>Timestamp</th>
+                    <th style={S.th}>Started</th>
+                    <th style={S.th}>Duration</th>
                     <th style={S.th}>Status</th>
                     <th style={S.th}>Result / Error</th>
                   </tr>
@@ -350,17 +427,22 @@ function JobRow({
                   {runs.map((r, i) => (
                     <tr key={i}>
                       <td style={{ ...S.td, color: C.textDim }}>
-                        {new Date(r.timestamp).toLocaleString()}
+                        {new Date(r.startedAt).toLocaleString()}
                         <span style={{ marginLeft: 6, fontSize: 11 }}>
-                          ({relativeTime(r.timestamp)})
+                          ({relativeTime(new Date(r.startedAt).toISOString())})
                         </span>
+                      </td>
+                      <td style={{ ...S.td, color: C.textDim, fontSize: 11 }}>
+                        {r.completedAt && r.startedAt
+                          ? `${((r.completedAt - r.startedAt) / 1000).toFixed(1)}s`
+                          : "-"}
                       </td>
                       <td style={S.td}>
                         <span
                           style={S.badge(
-                            r.status === "success"
+                            r.status === "ok"
                               ? C.success
-                              : r.status === "error" || r.status === "failed"
+                              : r.status === "error"
                                 ? C.error
                                 : C.textDim,
                           )}
