@@ -34,6 +34,27 @@ export interface AgentResponse {
 }
 
 // ---------------------------------------------------------------------------
+// Tool call progress callback types
+// ---------------------------------------------------------------------------
+
+export interface ToolCallProgress {
+  /** Tool name being invoked */
+  toolName: string;
+  /** Tool input arguments */
+  toolInput: Record<string, unknown>;
+  /** Result of the tool call (only set when phase is "result") */
+  result?: string;
+  /** Phase of the tool call */
+  phase: "start" | "result";
+}
+
+/**
+ * Callback fired during the agentic loop to report tool call progress.
+ * messages.ts uses this to send intermediate Discord messages.
+ */
+export type OnToolCallProgress = (progress: ToolCallProgress) => void | Promise<void>;
+
+// ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
 
@@ -423,6 +444,8 @@ export async function processMessage(opts: {
   };
   history: Message[];
   channelConfig?: ChannelConfig;
+  /** Optional callback to report tool call progress for live Discord updates */
+  onToolCallProgress?: OnToolCallProgress;
 }): Promise<AgentResponse> {
   const systemPrompt = buildSystemPrompt({
     context: opts.context,
@@ -550,11 +573,40 @@ export async function processMessage(opts: {
     for (const block of response.content) {
       if (block.type === "tool_use") {
         console.log(`[agent] Tool call: ${block.name}`, JSON.stringify(block.input));
+
+        // Fire progress callback: tool starting
+        if (opts.onToolCallProgress) {
+          try {
+            await opts.onToolCallProgress({
+              toolName: block.name,
+              toolInput: block.input as Record<string, unknown>,
+              phase: "start",
+            });
+          } catch (err) {
+            console.error("[agent] onToolCallProgress (start) error:", err);
+          }
+        }
+
         const result = await executeTool(
           block.name,
           block.input as Record<string, unknown>,
           { sessionId: opts.sessionId, userId: opts.context.userId },
         );
+
+        // Fire progress callback: tool completed with result
+        if (opts.onToolCallProgress) {
+          try {
+            await opts.onToolCallProgress({
+              toolName: block.name,
+              toolInput: block.input as Record<string, unknown>,
+              result,
+              phase: "result",
+            });
+          } catch (err) {
+            console.error("[agent] onToolCallProgress (result) error:", err);
+          }
+        }
+
         toolResults.push({
           type: "tool_result",
           tool_use_id: block.id,

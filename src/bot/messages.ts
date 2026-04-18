@@ -11,7 +11,7 @@ import {
 import { existsSync } from "fs";
 import { basename, extname } from "path";
 import { processMessage } from "../agent/agent.js";
-import type { AgentResponse, AgentImage } from "../agent/agent.js";
+import type { AgentResponse, AgentImage, ToolCallProgress } from "../agent/agent.js";
 import { resolveSession, getSessionHistory } from "../agent/sessions.js";
 import { getChannelConfig, addMessage } from "../db/index.js";
 import type { TokenUsage } from "../db/index.js";
@@ -777,6 +777,245 @@ function isMonitoredChannel(message: DiscordMessage): boolean {
 }
 
 // ---------------------------------------------------------------------------
+// Tool call progress → Discord message formatting
+// ---------------------------------------------------------------------------
+
+/** Emoji map for tool categories */
+const TOOL_EMOJI: Record<string, string> = {
+  // Memory
+  memory_search: "🔍",
+  memory_get: "📖",
+  mem9_store: "💾",
+  mem9_update: "✏️",
+  mem9_delete: "🗑️",
+  // Discord
+  send_message: "💬",
+  send_file: "📎",
+  add_reaction: "😀",
+  get_channel_history: "📜",
+  create_thread: "🧵",
+  // Skills
+  read_skill: "📚",
+  list_skill_files: "📂",
+  // Dangerous / system
+  bash: "⚙️",
+  read_file: "📄",
+  write_file: "✍️",
+  // Evolution
+  evolve_start: "🧬",
+  evolve_read: "🧬",
+  evolve_write: "🧬",
+  evolve_bash: "🧬",
+  evolve_propose: "🧬",
+  evolve_suggest: "💡",
+  evolve_cancel: "🧬",
+  evolve_review: "🧬",
+  evolve_merge: "🧬",
+  // Conversation history
+  get_conversation_history: "📜",
+  get_conversation_stats: "📊",
+};
+
+/** Max length for tool input/result preview in Discord message */
+const MAX_TOOL_PREVIEW_LENGTH = 300;
+
+/** Truncate a string and add ellipsis if too long */
+function truncate(s: string, max: number): string {
+  if (s.length <= max) return s;
+  return s.slice(0, max - 1) + "…";
+}
+
+/**
+ * Format a tool input object into a brief human-readable preview.
+ * Shows key parameters without overwhelming the Discord channel.
+ */
+function formatToolInput(toolName: string, input: Record<string, unknown>): string {
+  // For specific tools, show the most relevant parameter
+  switch (toolName) {
+    case "memory_search":
+      return input.query ? `\`${truncate(String(input.query), 80)}\`` : "";
+    case "memory_get":
+      return input.path ? `\`${truncate(String(input.path), 80)}\`` : "";
+    case "mem9_store":
+      return input.content ? `\`${truncate(String(input.content), 100)}\`` : "";
+    case "bash":
+      return input.command ? `\`${truncate(String(input.command), 120)}\`` : "";
+    case "read_file":
+    case "write_file":
+      return input.path ? `\`${truncate(String(input.path), 100)}\`` : "";
+    case "read_skill":
+      return input.skill_name ? `\`${String(input.skill_name)}\`` : "";
+    case "send_message":
+      return input.text ? `\`${truncate(String(input.text), 80)}\`` : "";
+    case "evolve_start":
+      return input.reason ? `\`${truncate(String(input.reason), 100)}\`` : "";
+    case "evolve_read":
+    case "evolve_write":
+      return input.path ? `\`${truncate(String(input.path), 100)}\`` : "";
+    case "evolve_bash":
+      return input.command ? `\`${truncate(String(input.command), 120)}\`` : "";
+    case "evolve_propose":
+      return input.summary ? `\`${truncate(String(input.summary), 100)}\`` : "";
+    case "evolve_suggest":
+      return input.what ? `\`${truncate(String(input.what), 100)}\`` : "";
+    default: {
+      // Generic: show first string-valued key
+      const firstKey = Object.keys(input).find((k) => typeof input[k] === "string");
+      if (firstKey) {
+        return `\`${truncate(String(input[firstKey]), 80)}\``;
+      }
+      return "";
+    }
+  }
+}
+
+/**
+ * Format a tool result for display. Truncates and wraps in a code block.
+ */
+function formatToolResult(result: string): string {
+  // Try to parse JSON for prettier display
+  let display = result;
+  try {
+    const parsed = JSON.parse(result);
+    if (parsed.error) {
+      return `❌ Error: ${truncate(String(parsed.error), MAX_TOOL_PREVIEW_LENGTH)}`;
+    }
+    // For success responses, show a brief summary
+    if (parsed.success === true) {
+      // Remove the success field and show the rest briefly
+      const { success: _, ...rest } = parsed;
+      const restStr = JSON.stringify(rest);
+      if (restStr === "{}" || restStr === "{}") return "✅";
+      display = restStr;
+    } else {
+      display = JSON.stringify(parsed);
+    }
+  } catch {
+    // Not JSON — use raw
+  }
+
+  const truncated = truncate(display, MAX_TOOL_PREVIEW_LENGTH);
+
+  // If short enough, inline it; otherwise use a code block
+  if (truncated.length < 80 && !truncated.includes("\n")) {
+    return truncated;
+  }
+  return `\`\`\`\n${truncated}\n\`\`\``;
+}
+
+/**
+ * Build the Discord message text for a tool call progress event.
+ * Returns null if this tool call should be silently skipped.
+ */
+function formatToolCallMessage(progress: ToolCallProgress): string | null {
+  const emoji = TOOL_EMOJI[progress.toolName] || "🔧";
+
+  if (progress.phase === "start") {
+    const inputPreview = formatToolInput(progress.toolName, progress.toolInput);
+    const inputPart = inputPreview ? ` ${inputPreview}` : "";
+    return `-# ${emoji} **${progress.toolName}**${inputPart}`;
+  }
+
+  // phase === "result"
+  if (progress.result !== undefined) {
+    const resultPreview = formatToolResult(progress.result);
+    const inputPreview = formatToolInput(progress.toolName, progress.toolInput);
+    const inputPart = inputPreview ? ` ${inputPreview}` : "";
+    return `-# ${emoji} **${progress.toolName}**${inputPart} → ${resultPreview}`;
+  }
+
+  return null;
+}
+
+// ---------------------------------------------------------------------------
+// Rate-limited tool call progress sender
+// ---------------------------------------------------------------------------
+
+/**
+ * Creates an onToolCallProgress callback that sends tool call updates
+ * to a Discord channel as separate messages.
+ *
+ * Batches rapid tool calls to respect Discord rate limits (~5 msgs / 5s).
+ * Only sends "result" phase messages (start + result would double the noise).
+ */
+function createToolCallProgressHandler(
+  replyTarget: DiscordMessage["channel"] | ThreadChannel,
+): (progress: ToolCallProgress) => Promise<void> {
+  // Rate limiting: track messages sent in the current window
+  let messagesSentInWindow = 0;
+  let windowStart = Date.now();
+  const MAX_MESSAGES_PER_WINDOW = 4; // Leave headroom for the final response
+  const WINDOW_MS = 5000; // 5 second window
+
+  // Batch buffer for when rate limited
+  let pendingBatch: string[] = [];
+  let batchFlushTimer: ReturnType<typeof setTimeout> | null = null;
+
+  const sendToDiscord = async (text: string) => {
+    if (!("send" in replyTarget)) return;
+
+    // Ensure within Discord's 2000 char limit
+    const truncatedText = text.length > DISCORD_MAX_LENGTH
+      ? text.slice(0, DISCORD_MAX_LENGTH - 3) + "..."
+      : text;
+
+    try {
+      await (replyTarget as TextChannel | ThreadChannel).send(truncatedText);
+    } catch (err) {
+      console.error("[bot] Failed to send tool progress message:", err);
+    }
+  };
+
+  const flushBatch = async () => {
+    if (pendingBatch.length === 0) return;
+    const combined = pendingBatch.join("\n");
+    pendingBatch = [];
+    batchFlushTimer = null;
+    await sendToDiscord(combined);
+    messagesSentInWindow++;
+  };
+
+  return async (progress: ToolCallProgress) => {
+    // Only send "result" phase to reduce noise — shows both input and output in one message
+    if (progress.phase !== "result") return;
+
+    const msgText = formatToolCallMessage(progress);
+    if (!msgText) return;
+
+    // Reset rate limit window if enough time has passed
+    const now = Date.now();
+    if (now - windowStart > WINDOW_MS) {
+      messagesSentInWindow = 0;
+      windowStart = now;
+    }
+
+    // If under rate limit, send immediately (flushing any pending batch first)
+    if (messagesSentInWindow < MAX_MESSAGES_PER_WINDOW) {
+      if (pendingBatch.length > 0) {
+        pendingBatch.push(msgText);
+        await flushBatch();
+      } else {
+        await sendToDiscord(msgText);
+        messagesSentInWindow++;
+      }
+    } else {
+      // Over rate limit — batch the message
+      pendingBatch.push(msgText);
+
+      // Set a flush timer if not already set
+      if (!batchFlushTimer) {
+        const timeToWindowEnd = WINDOW_MS - (now - windowStart);
+        batchFlushTimer = setTimeout(async () => {
+          messagesSentInWindow = 0;
+          windowStart = Date.now();
+          await flushBatch();
+        }, timeToWindowEnd + 100); // Small buffer after window resets
+      }
+    }
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Main message handler
 // ---------------------------------------------------------------------------
 
@@ -1011,6 +1250,9 @@ export async function handleMessage(message: DiscordMessage): Promise<void> {
     ? `${cleanContent}${attachmentNote}`
     : (attachmentNote ? attachmentNote.trim() : "");
 
+  // 9b. Create tool call progress handler for live Discord updates
+  const onToolCallProgress = createToolCallProgressHandler(replyTarget);
+
   try {
     // 10. Agent dispatch — track latency
     const startTime = Date.now();
@@ -1025,6 +1267,7 @@ export async function handleMessage(message: DiscordMessage): Promise<void> {
       },
       history,
       channelConfig,
+      onToolCallProgress,
     });
     const durationMs = Date.now() - startTime;
 
