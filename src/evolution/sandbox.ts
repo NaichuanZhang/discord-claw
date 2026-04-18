@@ -6,6 +6,7 @@
 // ---------------------------------------------------------------------------
 
 import { Daytona, Image } from "@daytona/sdk";
+import { getConfig } from "../db/index.js";
 
 const SANDBOX_TIMEOUT = 300; // 5 min to create sandbox
 const COMMAND_TIMEOUT = 180; // 3 min per command
@@ -207,9 +208,36 @@ export async function runSandboxValidation(opts: {
 }
 
 // ---------------------------------------------------------------------------
-// Check if Daytona sandbox CI is available
+// Check if Daytona sandbox CI is available and enabled
 // ---------------------------------------------------------------------------
 
+/**
+ * Returns true if sandbox CI should be used for evolution validation.
+ * Requires both:
+ *   1. DAYTONA_API_KEY env var is set (credentials available)
+ *   2. The "sandbox_ci_enabled" config flag is set to "true" in the DB
+ *      (defaults to "true" if not explicitly set — opt-out model)
+ */
 export function isSandboxCIAvailable(): boolean {
-  return !!process.env.DAYTONA_API_KEY;
+  if (!process.env.DAYTONA_API_KEY) return false;
+  const enabled = getConfig("sandbox_ci_enabled");
+  // Default to enabled if the key has not been set yet
+  return enabled !== "false";
+}
+
+/**
+ * Returns the sandbox CI configuration status for the UI.
+ */
+export function getSandboxCIStatus(): {
+  enabled: boolean;
+  apiKeyConfigured: boolean;
+  apiUrl: string;
+} {
+  const apiKeyConfigured = !!process.env.DAYTONA_API_KEY;
+  const enabledFlag = getConfig("sandbox_ci_enabled");
+  // Default to enabled when not explicitly set
+  const enabled = apiKeyConfigured && enabledFlag !== "false";
+  const apiUrl = process.env.DAYTONA_API_URL || "https://app.daytona.io/api";
+
+  return { enabled, apiKeyConfigured, apiUrl };
 }

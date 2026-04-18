@@ -16,6 +16,12 @@ interface EvolutionRecord {
   deployedAt: number | null;
 }
 
+interface SandboxCIStatus {
+  enabled: boolean;
+  apiKeyConfigured: boolean;
+  apiUrl: string;
+}
+
 const statusColors: Record<string, string> = {
   idea: C.warning,
   proposing: C.accent,
@@ -25,6 +31,146 @@ const statusColors: Record<string, string> = {
   cancelled: C.textDim,
   rejected: C.textDim,
 };
+
+// ── Sandbox CI Config Card ───────────────────────────────────────────
+
+function SandboxCICard() {
+  const [status, setStatus] = useState<SandboxCIStatus | null>(null);
+  const [toggling, setToggling] = useState(false);
+  const [error, setError] = useState("");
+
+  const load = async () => {
+    try {
+      const data = await apiFetch<SandboxCIStatus>("/api/evolutions/sandbox-ci");
+      setStatus(data);
+      setError("");
+    } catch (err: any) {
+      setError(err.message);
+    }
+  };
+
+  useEffect(() => {
+    load();
+  }, []);
+
+  const toggle = async () => {
+    if (!status) return;
+    setToggling(true);
+    try {
+      const data = await apiFetch<SandboxCIStatus>("/api/evolutions/sandbox-ci", {
+        method: "PUT",
+        body: JSON.stringify({ enabled: !status.enabled }),
+      });
+      setStatus(data);
+      setError("");
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setToggling(false);
+    }
+  };
+
+  if (!status) {
+    return (
+      <div style={S.card}>
+        <div style={{ color: C.textDim, fontSize: 13 }}>Loading sandbox CI config...</div>
+      </div>
+    );
+  }
+
+  const canEnable = status.apiKeyConfigured;
+
+  return (
+    <div style={S.card}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+        <h3 style={{ ...S.h3, marginBottom: 0 }}>Sandbox CI</h3>
+        <span style={S.badge(status.enabled ? C.success : C.textDim)}>
+          {status.enabled ? "Enabled" : "Disabled"}
+        </span>
+      </div>
+
+      {error && (
+        <div style={{ color: C.error, fontSize: 13, marginBottom: 8 }}>
+          {error}
+        </div>
+      )}
+
+      <div style={{ fontSize: 13, color: C.textDim, marginBottom: 12, lineHeight: 1.6 }}>
+        When enabled, evolution PRs are validated in an ephemeral{" "}
+        <a
+          href="https://www.daytona.io"
+          target="_blank"
+          rel="noopener noreferrer"
+          style={{ color: "#3498db", textDecoration: "none" }}
+        >
+          Daytona
+        </a>{" "}
+        sandbox — clean install, typecheck, and tests in full isolation.
+        Falls back to local validation when disabled or if sandbox infra is unavailable.
+      </div>
+
+      {/* Status indicators */}
+      <div style={{ display: "flex", gap: 16, marginBottom: 16, flexWrap: "wrap" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13 }}>
+          <span style={{
+            width: 8,
+            height: 8,
+            borderRadius: "50%",
+            background: status.apiKeyConfigured ? C.success : C.error,
+            display: "inline-block",
+          }} />
+          <span style={{ color: status.apiKeyConfigured ? C.text : C.textDim }}>
+            API Key {status.apiKeyConfigured ? "configured" : "not set"}
+          </span>
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13 }}>
+          <span style={{
+            width: 8,
+            height: 8,
+            borderRadius: "50%",
+            background: status.enabled ? C.success : C.textDim,
+            display: "inline-block",
+          }} />
+          <span style={{ color: C.text }}>
+            Validation: {status.enabled ? "☁️ Sandbox" : "🖥️ Local"}
+          </span>
+        </div>
+        {status.apiKeyConfigured && (
+          <div style={{ fontSize: 12, color: C.textDim, fontFamily: "monospace" }}>
+            {status.apiUrl}
+          </div>
+        )}
+      </div>
+
+      {/* Toggle button */}
+      <button
+        onClick={toggle}
+        disabled={toggling || !canEnable}
+        style={{
+          ...S.btn,
+          background: status.enabled ? C.error + "cc" : C.success,
+          color: "#fff",
+          opacity: toggling || !canEnable ? 0.5 : 1,
+          cursor: toggling || !canEnable ? "not-allowed" : "pointer",
+        }}
+      >
+        {toggling
+          ? "Updating..."
+          : status.enabled
+            ? "Disable Sandbox CI"
+            : "Enable Sandbox CI"}
+      </button>
+
+      {!canEnable && (
+        <div style={{ color: C.warning, fontSize: 12, marginTop: 8 }}>
+          Set <code style={{ background: C.bg, padding: "1px 4px", borderRadius: 3 }}>DAYTONA_API_KEY</code> in your environment to enable sandbox CI.
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Evolution Page ───────────────────────────────────────────────────
 
 export default function Evolution() {
   const [evolutions, setEvolutions] = useState<EvolutionRecord[]>([]);
@@ -62,6 +208,9 @@ export default function Evolution() {
   return (
     <div>
       <h2 style={S.h2}>Evolution</h2>
+
+      {/* Sandbox CI Config */}
+      <SandboxCICard />
 
       {error && (
         <div style={{ ...S.card, background: C.error + "22", color: C.error, marginBottom: 12 }}>

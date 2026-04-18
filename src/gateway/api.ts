@@ -19,6 +19,7 @@ import {
   getIdeas,
   updateEvolution,
 } from "../evolution/log.js";
+import { getSandboxCIStatus } from "../evolution/sandbox.js";
 import {
   getAppLogs,
   getErrorLogs,
@@ -550,6 +551,39 @@ export function createApiRouter(opts: {
     }
   });
 
+  // ── Sandbox CI config (must be before :id param route) ──
+
+  /** GET /api/evolutions/sandbox-ci — get sandbox CI status and config */
+  router.get("/evolutions/sandbox-ci", (_req: Request, res: Response) => {
+    try {
+      const status = getSandboxCIStatus();
+      res.json(status);
+    } catch (err) {
+      log("Error in GET /evolutions/sandbox-ci:", err);
+      res.status(500).json({ error: String(err) });
+    }
+  });
+
+  /** PUT /api/evolutions/sandbox-ci — toggle sandbox CI on/off */
+  router.put("/evolutions/sandbox-ci", (req: Request, res: Response) => {
+    try {
+      const { enabled } = req.body as { enabled: boolean };
+      if (typeof enabled !== "boolean") {
+        res.status(400).json({ error: "enabled must be a boolean" });
+        return;
+      }
+      setConfig("sandbox_ci_enabled", enabled ? "true" : "false");
+      log(`Sandbox CI ${enabled ? "enabled" : "disabled"} via gateway UI`);
+      const status = getSandboxCIStatus();
+      res.json(status);
+    } catch (err) {
+      log("Error in PUT /evolutions/sandbox-ci:", err);
+      res.status(500).json({ error: String(err) });
+    }
+  });
+
+  // ── Evolution CRUD (parameterized routes after static ones) ──
+
   router.get("/evolutions/:id", (req: Request, res: Response) => {
     try {
       const id = param(req, "id");
@@ -584,6 +618,7 @@ export function createApiRouter(opts: {
       res.status(500).json({ error: String(err) });
     }
   });
+
 
   // =========================================================================
   // Logs (structured — application_log, error_log, tool_call_log)
