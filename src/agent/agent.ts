@@ -10,6 +10,13 @@ import { evolutionTools, handleEvolutionTool, setEvolutionContext } from "../evo
 import type { Message, ChannelConfig, TokenUsage } from "../db/index.js";
 import { recordSignal } from "../reflection/signals.js";
 import { getSkillService } from "../skills/service.js";
+import { createLogger, toolCallLog } from "../logging/logger.js";
+
+// ---------------------------------------------------------------------------
+// Logger
+// ---------------------------------------------------------------------------
+
+const log = createLogger("agent");
 
 // ---------------------------------------------------------------------------
 // Types
@@ -321,8 +328,9 @@ const MEMORY_TOOL_NAMES = new Set([
 async function executeTool(
   name: string,
   input: Record<string, unknown>,
-  context?: { sessionId?: string; userId?: string },
-): Promise<string> {
+  context?: { sessionId?: string; userId?: string; toolContext?: "interactive" | "cron" | "voice" },
+): Promise<{ result: string; durationMs: number }> {
+  const startTime = Date.now();
   let result: string;
 
   // Memory tools (async — queries local FTS5 + mem9 cloud in parallel)
@@ -362,14 +370,22 @@ async function executeTool(
     result = JSON.stringify({ error: `Unknown tool: ${name}` });
   }
 
-  // Record tool failures as signals for reflection
+  const durationMs = Date.now() - startTime;
+
+  // Determine success/failure and record structured tool call log
+  let success = true;
+  let errorMsg: string | undefined;
   try {
     const parsed = JSON.parse(result);
     if (parsed.error) {
+      success = false;
+      errorMsg = typeof parsed.error === "string" ? parsed.error.slice(0, 300) : JSON.stringify(parsed.error).slice(0, 300);
+
+      // Also record as signal for reflection (backward compat)
       recordSignal({
         type: "tool_failure",
         source: "agent",
-        detail: `Tool "${name}" failed: ${typeof parsed.error === "string" ? parsed.error.slice(0, 300) : JSON.stringify(parsed.error).slice(0, 300)}`,
+        detail: `Tool "${name}" failed: ${errorMsg}`,
         metadata: {
           tool: name,
           input: JSON.stringify(input).slice(0, 500),
@@ -383,7 +399,20 @@ async function executeTool(
     // Result wasn't JSON or parsing failed — that's fine
   }
 
-  return result;
+  // Record structured tool call log
+  toolCallLog({
+    tool: name,
+    input,
+    result,
+    success,
+    error: errorMsg,
+    durationMs,
+    context: context?.toolContext,
+    sessionId: context?.sessionId,
+    userId: context?.userId,
+  });
+
+  return { result, durationMs };
 }
 
 // ---------------------------------------------------------------------------
@@ -515,8 +544,9 @@ export async function processMessage(opts: {
 
     if (isDuplicate) {
       consecutiveDupes++;
-      console.log(
-        `[agent] Duplicate tool call detected (${consecutiveDupes}/${MAX_CONSECUTIVE_DUPES})`,
+      log.warn(
+        `Duplicate tool call detected (${consecutiveDupes}/${MAX_CONSECUTIVE_DUPES})`,
+        { tools: currentSignatures.map((s) => s.split(":")[0]) },
       );
     } else {
       consecutiveDupes = 0;
@@ -525,7 +555,9 @@ export async function processMessage(opts: {
 
     // If we've hit the dupe limit, force the model to stop looping
     if (consecutiveDupes >= MAX_CONSECUTIVE_DUPES) {
-      console.log("[agent] Breaking loop — repeated duplicate tool calls");
+      log.warn("Breaking loop — repeated duplicate tool calls", {
+        tools: currentSignatures.map((s) => s.split(":")[0]),
+      });
 
       // Record as a signal — duplicate loops indicate a potential issue
       recordSignal({
@@ -572,8 +604,6 @@ export async function processMessage(opts: {
 
     for (const block of response.content) {
       if (block.type === "tool_use") {
-        console.log(`[agent] Tool call: ${block.name}`, JSON.stringify(block.input));
-
         // Fire progress callback: tool starting
         if (opts.onToolCallProgress) {
           try {
@@ -583,14 +613,14 @@ export async function processMessage(opts: {
               phase: "start",
             });
           } catch (err) {
-            console.error("[agent] onToolCallProgress (start) error:", err);
+            log.error("onToolCallProgress (start) error", err);
           }
         }
 
-        const result = await executeTool(
+        const { result } = await executeTool(
           block.name,
           block.input as Record<string, unknown>,
-          { sessionId: opts.sessionId, userId: opts.context.userId },
+          { sessionId: opts.sessionId, userId: opts.context.userId, toolContext: "interactive" },
         );
 
         // Fire progress callback: tool completed with result
@@ -603,7 +633,7 @@ export async function processMessage(opts: {
               phase: "result",
             });
           } catch (err) {
-            console.error("[agent] onToolCallProgress (result) error:", err);
+            log.error("onToolCallProgress (result) error", err);
           }
         }
 
@@ -705,14 +735,14 @@ export async function processAgentTurn(opts: {
 
     if (isDuplicate) {
       consecutiveDupes++;
-      console.log(`[agent] Cron duplicate tool call (${consecutiveDupes}/${MAX_CONSECUTIVE_DUPES})`);
+      log.warn(`Cron duplicate tool call (${consecutiveDupes}/${MAX_CONSECUTIVE_DUPES})`);
     } else {
       consecutiveDupes = 0;
     }
     prevCallSignatures = currentSignatures;
 
     if (consecutiveDupes >= MAX_CONSECUTIVE_DUPES) {
-      console.log("[agent] Cron loop broken — repeated duplicate tool calls");
+      log.warn("Cron loop broken — repeated duplicate tool calls");
       messages.push({ role: "assistant", content: response.content });
       messages.push({
         role: "user",
@@ -739,12 +769,11 @@ export async function processAgentTurn(opts: {
 
     for (const block of response.content) {
       if (block.type === "tool_use") {
-        console.log(`[agent] Cron tool call: ${block.name}`, JSON.stringify(block.input));
-
-        // Route to the unified executeTool dispatcher
-        const result = await executeTool(
+        // Route to the unified executeTool dispatcher (with cron context)
+        const { result } = await executeTool(
           block.name,
           block.input as Record<string, unknown>,
+          { toolContext: "cron" },
         );
 
         toolResults.push({

@@ -104,9 +104,35 @@ Self-modification via GitHub PRs. `src/evolution/engine.ts` manages git worktree
 2. `vitest run` — Integration tests (120s timeout)
 3. Both must pass before the PR is created
 
+### Structured Logging
+
+`src/logging/` provides a lightweight structured logging system with three SQLite-backed log streams:
+
+| Table | Purpose | Retention |
+|-------|---------|-----------|
+| `application_log` | General operational events (info, warn, debug) | 7 days |
+| `error_log` | Errors & exceptions with stack traces | 30 days |
+| `tool_call_log` | Every tool invocation with input, result, timing, success/failure | 7 days |
+
+**Key files:**
+- `logging/logger.ts` — Core logging functions: `appLog()`, `errorLog()`, `toolCallLog()`, plus `createLogger(category)` factory for scoped module loggers
+- `logging/queries.ts` — Read-side queries: `getAppLogs()`, `getErrorLogs()`, `getToolCallLogs()`, `getToolCallStats()`, `getSlowestToolCalls()`, `getErrorCountsByCategory()`, `pruneLogs()`
+
+**Usage pattern:**
+```typescript
+import { createLogger, toolCallLog } from "../logging/logger.js";
+const log = createLogger("agent");
+log.info("Processing message", { userId: "123" });
+log.error("Failed to process", someError, { channelId: "456" });
+```
+
+All logging functions are **non-blocking and never throw** — errors during log persistence are silently caught. Console output is always preserved for the daemon's log buffer. DB persistence respects a configurable minimum log level (default: `info`).
+
+The reflection daemon automatically consumes structured logs alongside signals, providing tool call statistics, error breakdowns by category, and slowest tool calls as additional context for self-improvement analysis. Log pruning happens during each reflection cycle.
+
 ### Reflection System
 
-`src/reflection/` implements autonomous self-improvement discovery. Signal collection (`signals.ts`) passively records errors, tool failures, and duplicate loop patterns from `bot/messages.ts` and `agent/agent.ts`. The reflection daemon (`daemon.ts`) runs on a configurable interval (default: 6h), analyzes signals, and if an improvement is found, records an evolution idea and posts to Discord. Level 1 trust: never auto-implements.
+`src/reflection/` implements autonomous self-improvement discovery. Signal collection (`signals.ts`) passively records errors, tool failures, and duplicate loop patterns from `bot/messages.ts` and `agent/agent.ts`. The structured logging system (`src/logging/`) provides additional data: tool call statistics, error logs with stack traces, and performance metrics. The reflection daemon (`daemon.ts`) runs on a configurable interval (default: 6h), analyzes both signals and structured logs, and if an improvement is found, records an evolution idea and posts to Discord. Level 1 trust: never auto-implements.
 
 ### Gateway
 
@@ -124,6 +150,9 @@ SQLite with WAL mode, FKs enabled. Key tables in `src/db/index.ts`:
 - `signals` — reflection event collection (type, source, detail, metadata JSON)
 - `reflection_runs` — reflection daemon run history
 - `message_history` — archived messages from deleted/expired sessions (preserves conversation history across cleanup)
+- `application_log` — structured application log entries (level, category, message, metadata)
+- `error_log` — structured error log entries with stack traces
+- `tool_call_log` — tool invocation records with input, result, timing, success/failure status
 
 ### Migrations
 
@@ -142,6 +171,7 @@ Shell scripts in `migrations/` run by `start.sh` before build. All idempotent (`
 - **Shared utilities**: `src/shared/` contains extracted helpers used by both the main agent and the voice agent — `paths.ts` (project root resolution), `anthropic.ts` (SDK client factory), `discord-utils.ts` (channel/guild helpers), `conversation-history.ts` (cross-session message loading + conversation history tool definitions). Import from `shared/` when adding code that both pipelines need.
 - **Watchdog daemon**: `src/daemon/index.ts` is a standalone process (zero imports from the main bot) that spawns the bot, monitors health, handles crash recovery with evolution rollback, and sends Discord webhook notifications. Exit code 100 from the bot triggers a deploy-restart (git pull + rebuild) rather than a simple respawn.
 - **Signal collection is passive and non-blocking**: `recordSignal()` never throws — errors during recording are caught and logged.
+- **Structured logging is non-blocking**: All `appLog()`, `errorLog()`, and `toolCallLog()` calls silently catch DB errors. Console output is always preserved for the daemon log buffer. Use `createLogger(category)` factory for scoped module loggers.
 - **Token usage**: Aggregated across all API calls within a single user→response turn (including tool-use loops). Costs computed at query time (not stored) so pricing can be updated without migration.
 - **Production deployment**: `start.sh` runs: kill existing → git pull → npm ci (if lockfile changed) → migrations → seed cron → build → start → health check (30s timeout) → auto-rollback on failure. Discord webhook notifications on success/failure.
 - **Dynamic tool registration**: Some tools are conditionally registered based on config (e.g., mem9 tools only appear when `data/skills/mem9/auth.json` exists). Tool lists are built via functions (`getMemoryTools()`, `getAllTools()`, `getCronTools()`) rather than static arrays.
