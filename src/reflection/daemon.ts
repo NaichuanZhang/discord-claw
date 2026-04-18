@@ -17,6 +17,14 @@ import {
 } from "./signals.js";
 import { listEvolutions, type Evolution } from "../evolution/log.js";
 import { recordSuggestion } from "../evolution/engine.js";
+import { getErrorLogs, getErrorCountsByCategory, getToolCallStats, getSlowestToolCalls, pruneLogs } from "../logging/queries.js";
+import { createLogger } from "../logging/logger.js";
+
+// ---------------------------------------------------------------------------
+// Logger
+// ---------------------------------------------------------------------------
+
+const log = createLogger("reflection");
 
 // ---------------------------------------------------------------------------
 // Config
@@ -44,10 +52,6 @@ const MIN_SIGNALS_FOR_REFLECTION = parseInt(
 const SIGNAL_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 
 const REFLECTION_MODEL = process.env.REFLECTION_MODEL || process.env.ANTHROPIC_MODEL || "bedrock-claude-opus-4-7-1m";
-
-function log(...args: unknown[]): void {
-  console.log("[reflection]", ...args);
-}
 
 // ---------------------------------------------------------------------------
 // Discord notification callback
@@ -80,6 +84,11 @@ interface ReflectionContext {
   recentDeployed: Evolution[];
   conversationStats: { totalSessions: number; totalMessages: number };
   totalSignals: number;
+  // Structured log data
+  errorCountsByCategory: Record<string, number>;
+  toolCallStats: { tool: string; totalCalls: number; failures: number; avgDurationMs: number; maxDurationMs: number }[];
+  slowestToolCalls: { tool: string; durationMs: number; error: string | null }[];
+  recentErrors: { category: string; message: string; stack: string | null }[];
 }
 
 function gatherContext(): ReflectionContext {
@@ -105,6 +114,14 @@ function gatherContext(): ReflectionContext {
 
   const allSignals = getSignalsSince(since);
 
+  // Structured log data
+  const errorCountsByCategory = getErrorCountsByCategory(SIGNAL_LOOKBACK_MS);
+  const toolCallStats = getToolCallStats(SIGNAL_LOOKBACK_MS);
+  const slowestToolCalls = getSlowestToolCalls({ sinceMs: SIGNAL_LOOKBACK_MS, limit: 5 })
+    .map((r) => ({ tool: r.tool, durationMs: r.durationMs, error: r.error }));
+  const recentErrors = getErrorLogs({ sinceMs: SIGNAL_LOOKBACK_MS, limit: 20 })
+    .map((r) => ({ category: r.category, message: r.message, stack: r.stack }));
+
   return {
     signalSummary,
     topErrors,
@@ -118,6 +135,10 @@ function gatherContext(): ReflectionContext {
       totalMessages: messageRow.count,
     },
     totalSignals: allSignals.length,
+    errorCountsByCategory,
+    toolCallStats,
+    slowestToolCalls,
+    recentErrors,
   };
 }
 
@@ -167,6 +188,38 @@ Your job is to identify the SINGLE most impactful improvement you could make to 
     parts.push(`## Positive Signals\n${ctx.recentPositive.map((e) => `- [${e.count}x] ${e.detail}`).join("\n")}`);
   }
 
+  // --- Structured log data ---
+
+  if (Object.keys(ctx.errorCountsByCategory).length > 0) {
+    parts.push(`## Error Log Summary (by category)\n${Object.entries(ctx.errorCountsByCategory).map(([cat, count]) => `- **${cat}**: ${count} errors`).join("\n")}`);
+  }
+
+  if (ctx.recentErrors.length > 0) {
+    const errorLines = ctx.recentErrors.slice(0, 10).map((e) => {
+      const stackPreview = e.stack ? `\n  Stack: ${e.stack.split("\n")[0]}` : "";
+      return `- [${e.category}] ${e.message.slice(0, 200)}${stackPreview}`;
+    });
+    parts.push(`## Recent Errors (from error_log)\n${errorLines.join("\n")}`);
+  }
+
+  if (ctx.toolCallStats.length > 0) {
+    const toolLines = ctx.toolCallStats.map((t) => {
+      const failRate = t.totalCalls > 0 ? ((t.failures / t.totalCalls) * 100).toFixed(1) : "0";
+      return `- **${t.tool}**: ${t.totalCalls} calls, ${t.failures} failures (${failRate}%), avg ${t.avgDurationMs}ms, max ${t.maxDurationMs}ms`;
+    });
+    parts.push(`## Tool Call Statistics\n${toolLines.join("\n")}`);
+  }
+
+  if (ctx.slowestToolCalls.length > 0) {
+    const slowLines = ctx.slowestToolCalls.map((t) => {
+      const errorNote = t.error ? ` (error: ${t.error.slice(0, 100)})` : "";
+      return `- **${t.tool}**: ${t.durationMs}ms${errorNote}`;
+    });
+    parts.push(`## Slowest Tool Calls\n${slowLines.join("\n")}`);
+  }
+
+  // --- Existing ideas / deployed ---
+
   if (ctx.recentIdeas.length > 0) {
     parts.push(`## Existing Ideas (don't repeat these)\n${ctx.recentIdeas.map((e) => `- ${e.triggerMessage?.slice(0, 200)}`).join("\n")}`);
   }
@@ -210,14 +263,21 @@ async function runReflection(): Promise<ReflectionResult> {
     // 1. Gather context
     const ctx = gatherContext();
 
-    // Skip if not enough signals
-    if (ctx.totalSignals < MIN_SIGNALS_FOR_REFLECTION) {
-      log(`Skipping reflection — only ${ctx.totalSignals} signals (need ${MIN_SIGNALS_FOR_REFLECTION})`);
+    // Count structured logs too for the "enough data" check
+    const structuredLogCount =
+      Object.values(ctx.errorCountsByCategory).reduce((a, b) => a + b, 0) +
+      ctx.toolCallStats.reduce((a, t) => a + t.totalCalls, 0);
+
+    const totalDataPoints = ctx.totalSignals + structuredLogCount;
+
+    // Skip if not enough data
+    if (totalDataPoints < MIN_SIGNALS_FOR_REFLECTION) {
+      log.info(`Skipping reflection — only ${totalDataPoints} data points (need ${MIN_SIGNALS_FOR_REFLECTION})`);
       recordReflectionRun(runStarted, "skipped", 0, null, null, null);
       return { outcome: "skipped" };
     }
 
-    log(`Running reflection with ${ctx.totalSignals} signals...`);
+    log.info(`Running reflection with ${ctx.totalSignals} signals + ${structuredLogCount} structured log entries...`);
 
     // 2. Build prompt and call Claude
     const prompt = buildReflectionPrompt(ctx);
@@ -251,15 +311,15 @@ async function runReflection(): Promise<ReflectionResult> {
       }
       proposal = JSON.parse(jsonMatch[0]);
     } catch (parseErr) {
-      log("Failed to parse reflection response:", parseErr);
-      log("Raw response:", responseText.slice(0, 500));
+      log.error("Failed to parse reflection response", parseErr);
+      log.info(`Raw response: ${responseText.slice(0, 500)}`);
       recordReflectionRun(runStarted, "error", ctx.totalSignals, null, null, `Parse error: ${parseErr}`);
       return { outcome: "error", error: `Parse error: ${parseErr}` };
     }
 
     // 4. Act on the proposal
     if (!proposal.has_proposal) {
-      log(`Reflection concluded: no action needed. Reason: ${proposal.reasoning}`);
+      log.info(`Reflection concluded: no action needed. Reason: ${proposal.reasoning}`);
       recordReflectionRun(runStarted, "no_action", ctx.totalSignals, null, null, null);
       return { outcome: "no_action" };
     }
@@ -273,7 +333,7 @@ async function runReflection(): Promise<ReflectionResult> {
       triggeredBy: "reflection-daemon",
     });
 
-    log(`Reflection found improvement: "${proposal.title}" (${proposal.type}/${proposal.priority})`);
+    log.info(`Reflection found improvement: "${proposal.title}" (${proposal.type}/${proposal.priority})`);
 
     // 5. Notify Discord (Level 1: human must approve)
     if (_sendToDiscord && _reflectionChannelId) {
@@ -281,7 +341,7 @@ async function runReflection(): Promise<ReflectionResult> {
         const discordMessage = [
           `🔮 **Self-Reflection Report**`,
           ``,
-          `I analyzed ${ctx.totalSignals} signals from the last ${Math.round(SIGNAL_LOOKBACK_MS / 3600000)} hours and found a potential improvement:`,
+          `I analyzed ${ctx.totalSignals} signals + ${structuredLogCount} structured log entries from the last ${Math.round(SIGNAL_LOOKBACK_MS / 3600000)} hours and found a potential improvement:`,
           ``,
           proposalText,
           ``,
@@ -292,7 +352,7 @@ async function runReflection(): Promise<ReflectionResult> {
 
         await _sendToDiscord(_reflectionChannelId, discordMessage);
       } catch (err) {
-        log("Failed to send reflection to Discord:", err);
+        log.error("Failed to send reflection to Discord", err);
       }
     }
 
@@ -312,7 +372,7 @@ async function runReflection(): Promise<ReflectionResult> {
     };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    log("Reflection failed:", msg);
+    log.error("Reflection failed", err);
     recordReflectionRun(runStarted, "error", 0, null, null, msg);
     return { outcome: "error", error: msg };
   }
@@ -347,7 +407,7 @@ function recordReflectionRun(
         Date.now(),
       );
   } catch (err) {
-    console.error("[reflection] Failed to record run:", err);
+    log.error("Failed to record reflection run", err);
   }
 }
 
@@ -363,15 +423,15 @@ let _reflectionTimer: ReturnType<typeof setInterval> | null = null;
  */
 export function startReflectionDaemon(): void {
   if (_reflectionTimer) {
-    log("Daemon already running");
+    log.info("Daemon already running");
     return;
   }
 
   const hours = REFLECTION_INTERVAL_MS / 3600000;
-  log(`Starting reflection daemon (every ${hours}h, lookback ${SIGNAL_LOOKBACK_MS / 3600000}h, min signals: ${MIN_SIGNALS_FOR_REFLECTION})`);
+  log.info(`Starting reflection daemon (every ${hours}h, lookback ${SIGNAL_LOOKBACK_MS / 3600000}h, min signals: ${MIN_SIGNALS_FOR_REFLECTION})`);
 
   if (!_reflectionChannelId) {
-    log("WARNING: No REFLECTION_CHANNEL_ID set — ideas will be recorded but not posted to Discord");
+    log.warn("No REFLECTION_CHANNEL_ID set — ideas will be recorded but not posted to Discord");
   }
 
   _reflectionTimer = setInterval(async () => {
@@ -379,16 +439,23 @@ export function startReflectionDaemon(): void {
       // Prune old signals first
       const pruned = pruneSignals(Date.now() - SIGNAL_RETENTION_MS);
       if (pruned > 0) {
-        log(`Pruned ${pruned} old signals`);
+        log.info(`Pruned ${pruned} old signals`);
+      }
+
+      // Prune old structured logs too
+      const logsPruned = pruneLogs();
+      const totalLogsPruned = logsPruned.appPruned + logsPruned.errorPruned + logsPruned.toolPruned;
+      if (totalLogsPruned > 0) {
+        log.info(`Pruned ${totalLogsPruned} old log entries (app=${logsPruned.appPruned}, error=${logsPruned.errorPruned}, tool=${logsPruned.toolPruned})`);
       }
 
       await runReflection();
     } catch (err) {
-      log("Daemon tick error:", err);
+      log.error("Daemon tick error", err);
     }
   }, REFLECTION_INTERVAL_MS);
 
-  log("Reflection daemon started");
+  log.info("Reflection daemon started");
 }
 
 /**
@@ -398,7 +465,7 @@ export function stopReflectionDaemon(): void {
   if (_reflectionTimer) {
     clearInterval(_reflectionTimer);
     _reflectionTimer = null;
-    log("Reflection daemon stopped");
+    log.info("Reflection daemon stopped");
   }
 }
 
@@ -406,6 +473,6 @@ export function stopReflectionDaemon(): void {
  * Manually trigger a reflection cycle (for testing/debugging).
  */
 export async function triggerReflection(): Promise<ReflectionResult> {
-  log("Manual reflection triggered");
+  log.info("Manual reflection triggered");
   return runReflection();
 }

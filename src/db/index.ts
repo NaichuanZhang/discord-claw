@@ -216,6 +216,60 @@ export function initDb(): void {
     CREATE INDEX IF NOT EXISTS idx_signals_created_at ON signals(created_at);
     CREATE INDEX IF NOT EXISTS idx_messages_created_at ON messages(created_at);
   `);
+
+  // ---------------------------------------------------------------------------
+  // Structured logging tables
+  // ---------------------------------------------------------------------------
+
+  d.exec(`
+    CREATE TABLE IF NOT EXISTS application_log (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      level TEXT NOT NULL,
+      category TEXT NOT NULL,
+      message TEXT NOT NULL,
+      metadata TEXT,
+      session_id TEXT,
+      user_id TEXT,
+      created_at INTEGER NOT NULL DEFAULT (unixepoch() * 1000)
+    );
+
+    CREATE TABLE IF NOT EXISTS error_log (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      level TEXT NOT NULL,
+      category TEXT NOT NULL,
+      message TEXT NOT NULL,
+      stack TEXT,
+      metadata TEXT,
+      session_id TEXT,
+      user_id TEXT,
+      created_at INTEGER NOT NULL DEFAULT (unixepoch() * 1000)
+    );
+
+    CREATE TABLE IF NOT EXISTS tool_call_log (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      tool TEXT NOT NULL,
+      input TEXT,
+      result TEXT,
+      success INTEGER NOT NULL DEFAULT 1,
+      error TEXT,
+      duration_ms INTEGER NOT NULL DEFAULT 0,
+      context TEXT,
+      session_id TEXT,
+      user_id TEXT,
+      created_at INTEGER NOT NULL DEFAULT (unixepoch() * 1000)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_application_log_created_at ON application_log(created_at);
+    CREATE INDEX IF NOT EXISTS idx_application_log_level ON application_log(level);
+    CREATE INDEX IF NOT EXISTS idx_application_log_category ON application_log(category);
+
+    CREATE INDEX IF NOT EXISTS idx_error_log_created_at ON error_log(created_at);
+    CREATE INDEX IF NOT EXISTS idx_error_log_category ON error_log(category);
+
+    CREATE INDEX IF NOT EXISTS idx_tool_call_log_created_at ON tool_call_log(created_at);
+    CREATE INDEX IF NOT EXISTS idx_tool_call_log_tool ON tool_call_log(tool);
+    CREATE INDEX IF NOT EXISTS idx_tool_call_log_success ON tool_call_log(success);
+  `);
 }
 
 // ---------------------------------------------------------------------------
@@ -402,9 +456,6 @@ export function getRecentMessages(opts?: {
   const role = opts?.role ?? null;
   const d = getDb();
 
-  // Use named parameters to avoid better-sqlite3 issues with numbered params
-  // in UNION ALL queries. The (@x IS NULL OR column = @x) pattern lets us
-  // optionally filter.
   const sql = `
     SELECT * FROM (
       SELECT m.id, m.session_id, m.role, m.content, m.discord_message_id, m.created_at,
@@ -452,12 +503,10 @@ export function getConversationStats(sinceMs?: number): {
     "SELECT COUNT(*) as count FROM sessions WHERE last_active > ?"
   ).get(since) as { count: number }).count;
 
-  // Count sessions that have archived messages in the period too
   const archivedSessions = (d.prepare(
     "SELECT COUNT(DISTINCT session_id) as count FROM message_history WHERE created_at > ?"
   ).get(since) as { count: number }).count;
 
-  // Live messages
   const liveMessages = (d.prepare(
     "SELECT COUNT(*) as count FROM messages WHERE created_at > ?"
   ).get(since) as { count: number }).count;
@@ -466,7 +515,6 @@ export function getConversationStats(sinceMs?: number): {
     "SELECT COUNT(*) as count FROM message_history WHERE created_at > ?"
   ).get(since) as { count: number }).count;
 
-  // User messages
   const liveUserMessages = (d.prepare(
     "SELECT COUNT(*) as count FROM messages WHERE created_at > ? AND role = 'user'"
   ).get(since) as { count: number }).count;
@@ -475,7 +523,6 @@ export function getConversationStats(sinceMs?: number): {
     "SELECT COUNT(*) as count FROM message_history WHERE created_at > ? AND role = 'user'"
   ).get(since) as { count: number }).count;
 
-  // Unique users from both sources
   const uniqueUsers = (d.prepare(`
     SELECT COUNT(DISTINCT user_id) as count FROM (
       SELECT user_id FROM sessions WHERE last_active > ? AND user_id IS NOT NULL
