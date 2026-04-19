@@ -459,6 +459,20 @@ export function extractImages(text: string): { cleanText: string; images: AgentI
 }
 
 // ---------------------------------------------------------------------------
+// Abort check helper
+// ---------------------------------------------------------------------------
+
+/**
+ * Check if an AbortSignal has been triggered and throw if so.
+ * Used between turns in the agentic loop to allow early exit.
+ */
+function checkAbort(signal?: AbortSignal): void {
+  if (signal?.aborted) {
+    throw new Error("Session aborted");
+  }
+}
+
+// ---------------------------------------------------------------------------
 // processMessage — main conversation entry point
 // ---------------------------------------------------------------------------
 
@@ -475,6 +489,8 @@ export async function processMessage(opts: {
   channelConfig?: ChannelConfig;
   /** Optional callback to report tool call progress for live Discord updates */
   onToolCallProgress?: OnToolCallProgress;
+  /** Optional abort signal — checked between agentic loop turns */
+  signal?: AbortSignal;
 }): Promise<AgentResponse> {
   const systemPrompt = buildSystemPrompt({
     context: opts.context,
@@ -503,6 +519,9 @@ export async function processMessage(opts: {
   let consecutiveDupes = 0;
 
   while (true) {
+    // Check for abort between turns
+    checkAbort(opts.signal);
+
     turns++;
 
     const response = await anthropicClient.messages.create({
@@ -512,6 +531,9 @@ export async function processMessage(opts: {
       messages,
       tools: allTools,
     });
+
+    // Check for abort after API call
+    checkAbort(opts.signal);
 
     // Aggregate token usage
     totalUsage = aggregateUsage(totalUsage, response, response.model);
@@ -604,6 +626,9 @@ export async function processMessage(opts: {
 
     for (const block of response.content) {
       if (block.type === "tool_use") {
+        // Check abort before each tool call
+        checkAbort(opts.signal);
+
         // Fire progress callback: tool starting
         if (opts.onToolCallProgress) {
           try {

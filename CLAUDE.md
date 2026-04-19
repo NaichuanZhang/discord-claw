@@ -85,6 +85,8 @@ Separate from voice chat: `audio/transcribe.ts` handles Discord voice message tr
 
 Sessions are keyed by thread/channel/user/DM combination. `agent/sessions.ts` resolves the correct session and loads history from SQLite. Sessions auto-expire based on `SESSION_TTL_HOURS`. Thread-based sessions use the `thread:<threadId>` key format. Messages are archived across sessions, queryable via `get_conversation_history` and `get_conversation_stats` tools (defined in `shared/conversation-history.ts`).
 
+**Per-session locking** (`agent/session-lock.ts`): A mutex-style lock ensures only one message is processed at a time per session. If a second message arrives while the first is still processing, it queues and waits. This prevents interleaved responses, race conditions on session history, and duplicate API calls. The lock is acquired in `bot/messages.ts` after session resolution and released in a `finally` block. An `AbortSignal` is passed through to `agent/agent.ts` and checked between agentic loop turns and before each tool call — enabling graceful cancellation via the `/stop` command. The `/stop` slash command calls `abortAllSessions()` which triggers the abort signal on all active processing and rejects all queued waiters.
+
 ### Soul, Memory, and Skills
 
 - **Soul**: Bot personality loaded from `data/SOUL.md` with filesystem watcher for hot-reload. Injected into every system prompt.
