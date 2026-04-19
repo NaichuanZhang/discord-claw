@@ -15,12 +15,14 @@ A stripped-down Discord agent powered by Claude. Simplified fork of [openclaw](h
 - 🧠 **Persistent Memory** — Remembers things across conversations. Markdown files indexed with FTS5 full-text search.
 - 📜 **Conversation History** — Messages are archived across sessions. Query past conversations with `get_conversation_history` and `get_conversation_stats` tools.
 - 🎭 **Customizable Personality** — Edit `SOUL.md` to change how the bot behaves. Hot-reloads on save.
-- 🔧 **Tool Use** — Runs shell commands, reads/writes files, sends messages across channels, reacts to messages, attaches files, creates threads.
+- 🔧 **Tool Use** — Runs shell commands, reads/writes files, sends messages across channels, reacts to messages, attaches files, creates threads. Real-time tool call progress shown in Discord during agentic loops.
+- 🔒 **Session Locking** — Per-session mutex prevents interleaved responses. `/stop` command aborts all active processing with graceful cancellation.
 - 📦 **Skills** — Drop a `SKILL.md` folder into `data/skills/` and the bot learns new capabilities instantly. Install from GitHub or upload directly.
 - ⏰ **Scheduled Tasks** — Cron jobs that run agent turns on a schedule, delivering results in daily threads. Hot-reloads `jobs.json` without restart.
-- 🧬 **Self-Evolution** — The bot can modify its own source code via GitHub PRs. Review diffs and merge from Discord. Deployment notifications posted automatically.
-- 🔍 **Autonomous Reflection** — Collects signals (errors, tool failures, duplicate loops) and periodically analyzes them to suggest improvements.
+- 🧬 **Self-Evolution** — The bot can modify its own source code via GitHub PRs. Review diffs and merge from Discord. Optional Daytona sandbox CI for isolated validation. Deployment notifications posted automatically.
+- 🔍 **Autonomous Reflection** — Collects signals (errors, tool failures, duplicate loops) and structured logs, then periodically analyzes them to suggest improvements.
 - 📊 **Web Dashboard** — React SPA for managing sessions, channels, soul, memory, cron, skills, and evolution history.
+- 📝 **Structured Logging** — Three SQLite-backed log streams (application, error, tool calls) with dashboard viewer and automatic pruning.
 - 🔍 **Web Search** — Install the SearXNG skill for web, news, and package repository search.
 
 ## Demo User Flow
@@ -65,6 +67,7 @@ Bot: [evolve_merge] Merged and restarting... ✅
 | `/skills` | List, install (from GitHub or file upload), or remove skills |
 | `/cron` | View, add, enable/disable, force-run, or show history of cron jobs |
 | `/restart` | Restart the bot process |
+| `/stop` | Abort all active processing sessions (graceful cancellation via AbortSignal) |
 | `/join` | Join your voice channel as a voice assistant |
 | `/leave` | Leave the voice channel |
 
@@ -80,6 +83,7 @@ Each instance of Discordclaw is its own bot with its own personality, memory, an
 - An **Anthropic API key** (or a proxy endpoint)
 - *(Optional)* An **OpenAI API key** for voice message transcription
 - *(Optional)* An **EigenAI API key** for voice assistant STT/TTS
+- *(Optional)* A **Daytona API key** for sandbox CI during evolution validation
 
 ### 1. Fork & Clone
 
@@ -120,6 +124,7 @@ EIGENAI_API_KEY=your_eigenai_key        # Voice assistant STT/TTS
 GATEWAY_PORT=3000                        # Dashboard port
 GATEWAY_TOKEN=your_secret_token          # Dashboard auth token
 ANTHROPIC_MODEL=bedrock-claude-opus-4-7-1m # Model override (this is the default)
+DAYTONA_API_KEY=your_daytona_key        # Sandbox CI for evolution validation
 ```
 
 ### 4. Install & Run
@@ -191,6 +196,8 @@ git merge upstream/main
 | `GATEWAY_TOKEN` | No | Auth token for dashboard API access |
 | `SESSION_TTL_HOURS` | No | Session expiry (default: `24`) |
 | `DISCORD_WEBHOOK_URL` | No | Webhook for `start.sh` notifications (deploy, rollback alerts) |
+| `DAYTONA_API_KEY` | No | Daytona API key for sandbox CI during evolution validation (falls back to local if not set) |
+| `DAYTONA_API_URL` | No | Daytona API endpoint (default: `https://app.daytona.io/api`) |
 | `REFLECTION_CHANNEL_ID` | No | Discord channel for reflection daemon proposals |
 | `REFLECTION_INTERVAL_HOURS` | No | How often the reflection daemon runs (default: `6`) |
 | `REFLECTION_LOOKBACK_HOURS` | No | Signal lookback window (default: `24`) |
@@ -212,7 +219,7 @@ git merge upstream/main
 
 **Memory** — Markdown files in `data/` indexed with SQLite FTS5. The agent searches memory before answering questions about past context. BM25 ranked results. Queries are sanitized for FTS5 compatibility (special characters like hyphens and colons are handled automatically).
 
-**Sessions** — Per-thread/DM/channel conversation tracking. History loaded as context for each message. Auto-expires after TTL. Messages are archived to enable cross-session querying via `get_conversation_history` and `get_conversation_stats` tools.
+**Sessions** — Per-thread/DM/channel conversation tracking. History loaded as context for each message. Auto-expires after TTL. Messages are archived to enable cross-session querying via `get_conversation_history` and `get_conversation_stats` tools. Per-session mutex locking (`agent/session-lock.ts`) ensures only one message is processed at a time per session — queued messages wait until the lock is released. An `AbortSignal` is threaded through the agent loop, enabling graceful cancellation via the `/stop` command.
 
 **Cron** — Scheduled tasks with three schedule types: one-shot (`at`), interval (`every`), cron expression (`cron`). `agentTurn` jobs run the agent and deliver results inside daily threads (the agent handles all delivery via tools — no duplicate top-level messages). `systemEvent` jobs deliver results directly to the configured channel. Auto-disables after 3 consecutive failures. Hot-reloads `jobs.json` on each tick cycle (up to every 60s) so externally-added jobs are picked up without a restart.
 
@@ -220,7 +227,7 @@ git merge upstream/main
 
 **Dashboard** — Single-page React app at `http://localhost:3000`. Pages: Status, Sessions, Channels, Config, Cron, Skills, Evolution, Logs. Real-time message streaming via WebSocket.
 
-**Agent Loop** — The tool-use loop runs until the model produces a final text response. To prevent infinite loops, consecutive duplicate tool calls (same tool + same arguments) are detected — after 2 identical rounds the agent is forced to produce a final response. Typing indicator refreshes every 8 seconds to stay visible during long tool chains.
+**Agent Loop** — The tool-use loop runs until the model produces a final text response. To prevent infinite loops, consecutive duplicate tool calls (same tool + same arguments) are detected — after 2 identical rounds the agent is forced to produce a final response. Typing indicator refreshes every 8 seconds to stay visible during long tool chains. An `onToolCallProgress` callback fires for each tool invocation, sending real-time status messages to Discord (rate-limited to max 4 per 5s window).
 
 **Thread-First Replies** — In guild text channels, every bot response creates a thread on the user's message. Bot-created threads don't require @mentions for follow-up. Monitored channels auto-respond to all messages without @mention. DMs bypass threading entirely.
 
@@ -232,11 +239,18 @@ git merge upstream/main
 
 **Voice Assistant** — Real-time voice interaction in Discord voice channels. Pipeline: user speaks → opus decode → downsample to 16kHz mono → Silero VAD (ONNX, ~2MB model) detects speech boundaries → EigenAI Whisper V3 Turbo transcribes → LLM generates concise spoken response (1-3 sentences, no markdown) → EigenAI Chatterbox TTS synthesizes audio → bot speaks back. Supports two LLM backends: Anthropic Claude (default: `claude-sonnet-4-20250514`, configurable via `VOICE_MODEL`) with full tool support, or Eigen LLM (`VOICE_MODEL=eigen:<model>`) for minimum latency pure text mode (no tools). Max tokens default 512 (configurable via `VOICE_MAX_TOKENS`). Tools configurable via `VOICE_TOOLS_MODE`: `full` (memory, Discord, bash, file I/O, skills, conversation history — everything except evolution) or `minimal` (memory + conversation history only). Supports interruptions (cuts off bot when user starts speaking), streaming TTS pipelining (sentence-level), minimum utterance filtering (skips coughs/noise < 500ms), and auto-disconnect after 10 minutes idle. Auto-join mode tracks a configured user and joins/leaves their voice channel automatically. Requires `EIGENAI_API_KEY`.
 
-**Evolution Engine** — The bot can modify its own source code through GitHub pull requests. All changes are isolated in a git worktree at `beta/`, typechecked, tested, and submitted as PRs via `gh` CLI. The agent has 9 evolution tools: `evolve_start`, `evolve_read`, `evolve_write`, `evolve_bash`, `evolve_propose`, `evolve_suggest`, `evolve_cancel`, `evolve_review`, and `evolve_merge`. Users can review PR diffs and merge directly from Discord — merging automatically triggers a restart to deploy the changes and posts a deployment notification thread to a configured channel. The bot also records ideas for improvements it can't yet make (`evolve_suggest`). Evolution history is tracked in SQLite and viewable in the dashboard.
+**Evolution Engine** — The bot can modify its own source code through GitHub pull requests. All changes are isolated in a git worktree at `beta/`, validated, and submitted as PRs via `gh` CLI. Validation runs in two modes: **Daytona Sandbox CI** (preferred) spins up an ephemeral container via `@daytona/sdk`, clones the branch, runs `npm ci`, `tsc --noEmit`, and `vitest run` in full isolation — providing clean CI without interfering with the running bot; **local fallback** runs typecheck and tests in the worktree with symlinked `node_modules` when `DAYTONA_API_KEY` is not set. The agent has 9 evolution tools: `evolve_start`, `evolve_read`, `evolve_write`, `evolve_bash`, `evolve_propose`, `evolve_suggest`, `evolve_cancel`, `evolve_review`, and `evolve_merge`. Users can review PR diffs and merge directly from Discord — merging automatically triggers a restart to deploy the changes and posts a deployment notification thread to a configured channel. The bot also records ideas for improvements it can't yet make (`evolve_suggest`). Evolution history is tracked in SQLite and viewable in the dashboard.
+
+**Structured Logging** — Three SQLite-backed log streams for observability:
+- **Application log** (`application_log`): General operational events with level (`debug`, `info`, `warn`, `error`), category, and optional metadata.
+- **Error log** (`error_log`): Errors with stack traces, categorized for breakdown analysis.
+- **Tool call log** (`tool_call_log`): Every agent tool invocation with tool name, input, output, duration, and success/failure status.
+
+All logging functions (`appLog()`, `errorLog()`, `toolCallLog()`) are non-blocking and never throw — errors during log persistence are silently caught. Use `createLogger(category)` for scoped module loggers. Logs are viewable in the dashboard Logs page and automatically pruned during reflection cycles.
 
 **Reflection System** — Autonomous self-improvement discovery. Two components:
 - **Signal collection** (`reflection/signals.ts`): Passively records events — errors, tool failures, duplicate loop patterns. Never throws, ensuring it can't crash the main pipeline. Auto-prunes signals older than 7 days.
-- **Reflection daemon** (`reflection/daemon.ts`): Runs on a configurable interval (default: every 6 hours). Gathers signals, builds a structured analysis prompt, calls Claude, and if an improvement is found, records it as an evolution idea and posts a proposal to a Discord channel. Level 1 trust: never auto-implements — always requires human approval.
+- **Reflection daemon** (`reflection/daemon.ts`): Runs on a configurable interval (default: every 6 hours). Gathers signals and structured logs (tool call statistics, error breakdowns, slowest tool calls), builds a structured analysis prompt, calls Claude, and if an improvement is found, records it as an evolution idea and posts a proposal to a Discord channel. Level 1 trust: never auto-implements — always requires human approval.
 
 **Watchdog Daemon** — Standalone process (`src/daemon/index.ts`) that spawns the bot, monitors health, handles crash recovery with evolution rollback, and sends Discord webhook notifications. Exit code 100 from the bot triggers a deploy-restart (git pull + rebuild) rather than a simple respawn. Zero imports from the main bot.
 
@@ -267,11 +281,12 @@ graph TB
         subgraph Systems
             SOUL[Soul System<br/>SOUL.md]
             MEM[Memory System<br/>FTS5 Search]
-            SESS[Session Manager]
+            SESS[Session Manager<br/>+ Locking]
             CRON[Cron Service]
             EVO[Evolution Engine<br/>Self-Modification]
             VOICE[Voice Transcription<br/>Whisper API]
             REFL[Reflection Daemon<br/>Signal Analysis]
+            LOG[Structured Logging<br/>App / Error / Tool Calls]
         end
 
         subgraph Storage
@@ -288,6 +303,7 @@ graph TB
 
     CLAUDE[Claude API]
     OPENAI[OpenAI Whisper API]
+    DAYTONA[Daytona Sandbox CI]
 
     DU <-->|messages + voice| DG
     DG <-->|events| CL
@@ -307,17 +323,20 @@ graph TB
     TL -->|memory_search, memory_get| MEM
     TL -->|send_message, send_file, add_reaction, create_thread| CL
     TL -->|evolve_start, evolve_write, evolve_propose, evolve_merge| EVO
+    TL -->|tool call logging| LOG
     EVO -->|git worktree, gh pr create| GH[GitHub]
+    EVO -->|sandbox validation| DAYTONA
     EVO --> DB
     MH -->|log| DB
     MH -->|broadcast| WS
+    LOG --> DB
     MEM --> DB
     MEM --> FS
     SOUL --> FS
     CRON -->|agent turns| PM
     CRON -->|deliver| CL
     CRON --> FS
-    REFL -->|collect signals| DB
+    REFL -->|collect signals + logs| DB
     REFL -->|analyze| CLAUDE
     REFL -->|propose ideas| EVO
     API --> DB
@@ -339,6 +358,7 @@ sequenceDiagram
     participant B as Bot
     participant V as Voice Transcription
     participant S as Session Manager
+    participant L as Session Lock
     participant A as Agent
     participant C as Claude API
     participant M as Memory
@@ -357,28 +377,36 @@ sequenceDiagram
     S->>DB: lookup / create session
     S-->>B: session + history
 
+    B->>L: acquireSessionLock(sessionKey)
+    Note over L: Mutex — queues if another message is processing
+
     B->>B: Start typing indicator (refreshes every 8s)
-    B->>A: processMessage(text, history, context)
+    B->>A: processMessage(text, history, context, abortSignal)
     A->>A: Build system prompt (soul + memory instructions + channel config)
     A->>C: messages.create(system, messages, tools)
 
     loop Tool Use Loop (with duplicate detection)
+        A->>A: Check AbortSignal (graceful /stop cancellation)
         C-->>A: tool_use: memory_search
+        A->>B: onToolCallProgress(tool, input)
+        B->>U: Tool progress message (rate-limited)
         A->>M: searchMemory(query)
         M->>DB: FTS5 MATCH query (sanitized)
         M-->>A: ranked results
+        A->>DB: toolCallLog(tool, input, result, duration)
         A->>C: tool_result + continue
         A->>A: Check for duplicate tool calls
     end
 
     C-->>A: text response
-    A-->>B: AgentResponse (text + images)
+    A-->>B: AgentResponse (text + images + usage)
 
     B->>B: Stop typing indicator
     B->>DB: log + archive user message
-    B->>DB: log + archive assistant response
+    B->>DB: log + archive assistant response (with token usage)
     B->>U: Create thread → reply inside
     B->>WS: broadcastLog(entry)
+    B->>L: releaseSessionLock(sessionKey)
 ```
 
 ### Cron Job Execution
@@ -438,6 +466,7 @@ graph LR
     UI -->|GET/PUT /api/memory| API
     UI -->|CRUD /api/cron| API
     UI -->|GET /api/evolutions| API
+    UI -->|GET /api/logs/*| API
     UI <-->|real-time logs| WS
 
     API --> DB
@@ -808,6 +837,7 @@ sequenceDiagram
     participant A as Agent
     participant E as Evolution Engine
     participant W as beta/ Worktree
+    participant S as Daytona Sandbox
     participant GH as GitHub
     participant DC as Deploy Channel
 
@@ -824,8 +854,20 @@ sequenceDiagram
     end
 
     A->>E: evolve_propose(summary)
-    E->>W: npm run typecheck
-    E->>W: vitest run (120s timeout)
+
+    alt DAYTONA_API_KEY set
+        E->>S: Create ephemeral sandbox
+        S->>S: git clone branch
+        S->>S: npm ci (clean install)
+        S->>S: tsc --noEmit
+        S->>S: vitest run
+        S-->>E: pass/fail results
+        E->>S: Destroy sandbox
+    else Local fallback
+        E->>W: npm run typecheck
+        E->>W: vitest run (120s timeout)
+    end
+
     E->>W: git add + commit
     E->>GH: git push + gh pr create
     E->>E: git worktree remove beta/
@@ -857,12 +899,13 @@ discordclaw/
 │   ├── restart.ts            # Shared restart trigger — avoids circular deps
 │   ├── bot/                   # Discord bot (discord.js v14)
 │   │   ├── client.ts          # Client setup, intents, event routing, DM raw fallback
-│   │   ├── messages.ts        # Message pipeline: filter → session → voice transcribe → agent → thread reply
-│   │   └── commands.ts        # Slash commands: /ping /help /config /clear /soul /skills /cron /restart /join /leave
+│   │   ├── messages.ts        # Message pipeline: filter → session → lock → voice transcribe → agent → thread reply
+│   │   └── commands.ts        # Slash commands: /ping /help /config /clear /soul /skills /cron /restart /stop /join /leave
 │   ├── agent/                 # Claude integration
-│   │   ├── agent.ts           # Anthropic SDK wrapper, system prompt, tool loop + duplicate detection + conversation history tools
+│   │   ├── agent.ts           # Anthropic SDK wrapper, system prompt, tool loop + duplicate detection + abort signal
 │   │   ├── tools.ts           # Discord tools (send_message, send_file, add_reaction, get_channel_history, create_thread)
 │   │   ├── dangerous-tools.ts # Powerful tools: bash, read_file, write_file
+│   │   ├── session-lock.ts    # Per-session mutex lock with AbortSignal for /stop cancellation
 │   │   └── sessions.ts        # Per-thread/DM session tracking + TTL + message archiving
 │   ├── audio/                 # Voice message handling
 │   │   └── transcribe.ts      # Download + transcribe via OpenAI Whisper API
@@ -876,6 +919,9 @@ discordclaw/
 │   │   ├── eigenllm.ts        # Eigen LLM client — OpenAI-compatible streaming for low-latency pure text mode
 │   │   ├── autoJoin.ts        # Auto-join/leave voice channels when tracked user joins/leaves
 │   │   └── index.ts           # Orchestrator: wires receive → VAD → STT → agent → TTS → play
+│   ├── logging/               # Structured logging system
+│   │   ├── logger.ts          # Core: appLog(), errorLog(), toolCallLog(), createLogger(category) factory
+│   │   └── queries.ts         # Read-side: getAppLogs(), getErrorLogs(), getToolCallLogs(), stats, pruning
 │   ├── skills/                # Skills management (SDK pattern)
 │   │   ├── types.ts           # Skill, SkillMeta, SkillSource types
 │   │   ├── store.ts           # Filesystem-based discovery + per-skill .meta.json
@@ -900,6 +946,7 @@ discordclaw/
 │   │   └── daemon.ts          # Periodic analysis, idea generation, channel proposals
 │   ├── evolution/             # Self-evolution system
 │   │   ├── engine.ts          # Git worktree lifecycle, PR creation via gh CLI, deployment notifications
+│   │   ├── sandbox.ts         # Daytona sandbox CI — ephemeral container validation for evolution branches
 │   │   ├── log.ts             # Evolution SQLite table + CRUD
 │   │   ├── tools.ts           # Agent tools: evolve_start/read/write/bash/propose/suggest/cancel/review/merge
 │   │   └── health.ts          # /api/health endpoint for start.sh
@@ -909,9 +956,10 @@ discordclaw/
 │   │   └── index.ts           # SQLite schema, migrations, query helpers
 │   └── gateway/
 │       ├── server.ts          # Express + WebSocket server
-│       ├── api.ts             # REST API (status, sessions, channels, config, soul, memory, cron, skills, evolutions)
+│       ├── api.ts             # REST API (status, sessions, channels, config, soul, memory, cron, skills, evolutions, logs)
 │       └── ui/                # React SPA (Vite)
 │           ├── App.tsx         # Layout, routing, shared styles
+│           ├── shared.ts       # Shared utilities (colors, apiFetch, formatters) — breaks circular deps
 │           └── pages/          # Status, Sessions, Channels, Config, Cron, Skills, Evolution, Logs
 ├── tests/
 │   └── integration/           # Integration tests (vitest)
