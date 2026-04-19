@@ -7,6 +7,7 @@ import Cron from "./pages/Cron";
 import Skills from "./pages/Skills";
 import Logs from "./pages/Logs";
 import Evolution from "./pages/Evolution";
+import Coach from "./pages/Coach";
 
 // Re-export shared utilities so existing imports from "../App" still work
 export { apiFetch, relativeTime, formatDuration, C, S } from "./shared";
@@ -23,7 +24,11 @@ const pages: Record<string, { label: string; component: React.FC }> = {
   skills: { label: "Skills", component: Skills },
   evolution: { label: "Evolution", component: Evolution },
   logs: { label: "Logs", component: Logs },
+  coach: { label: "🚴 Coach", component: Coach },
 };
+
+// Pages that render full-screen (no sidebar/layout)
+const fullscreenPages = new Set(["coach"]);
 
 function getHash(): string {
   const h = window.location.hash.replace("#", "").toLowerCase();
@@ -42,6 +47,11 @@ export default function App() {
   }, []);
 
   const PageComponent = pages[page].component;
+
+  // Full-screen pages bypass the sidebar layout
+  if (fullscreenPages.has(page)) {
+    return <PageComponent />;
+  }
 
   return (
     <div style={{ display: "flex", minHeight: "100vh" }}>
