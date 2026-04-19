@@ -2,11 +2,13 @@
  * Voice Coach Orchestrator
  *
  * Wires together: mock cycling data → coach brain → ElevenLabs TTS → Discord playback.
+ * Also wires: rider audio → VAD → STT → message queue → coach brain context.
  *
  * Polling loop runs every POLL_INTERVAL_MS:
  *   1. Get current cycling telemetry
- *   2. Ask the coach brain what to say (LLM)
- *   3. If coach has something to say → synthesize via ElevenLabs → play in voice channel
+ *   2. Flush any rider messages from the listener queue
+ *   3. Ask the coach brain what to say (LLM) — includes rider speech context
+ *   4. If coach has something to say → synthesize via ElevenLabs → play in voice channel
  *
  * Designed to run independently of the main voice assistant pipeline.
  */
@@ -20,7 +22,9 @@ import {
   leaveCoachChannel,
   playCoachAudio,
   isCoachConnected,
+  getCoachConnection,
 } from "./player.js";
+import { startListening, stopListening, flushRiderMessages } from "./listener.js";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -146,6 +150,17 @@ async function startCoachSession(channel: VoiceBasedChannel): Promise<void> {
   resetCoachBrain();
   startRide();
 
+  // Start listening to the rider's speech
+  const connection = getCoachConnection();
+  if (connection && trackedUserId) {
+    try {
+      await startListening(connection, trackedUserId);
+      console.log("[voice-coach] Listener started — rider speech will be captured");
+    } catch (err) {
+      console.error("[voice-coach] Failed to start listener:", err);
+    }
+  }
+
   // Start the polling loop
   pollTimer = setInterval(pollCycle, POLL_INTERVAL_MS);
   console.log(`[voice-coach] Session started — polling every ${POLL_INTERVAL_MS}ms`);
@@ -153,7 +168,7 @@ async function startCoachSession(channel: VoiceBasedChannel): Promise<void> {
   // Play an intro message after a short delay
   setTimeout(async () => {
     try {
-      const introText = "Alright, let's get to work. I'm watching your numbers. Don't disappoint me.";
+      const introText = "Listen up, cupcake. I see every single watt, every heartbeat, every lazy pedal stroke. You talk, I hear you. You complain, I destroy you. Now shut up and ride.";
       console.log(`[voice-coach] Playing intro: "${introText}"`);
       const audio = await synthesizeElevenLabs(introText);
       await playCoachAudio(audio);
@@ -164,6 +179,9 @@ async function startCoachSession(channel: VoiceBasedChannel): Promise<void> {
 }
 
 function stopCoachSession(): void {
+  // Stop listening
+  stopListening();
+
   // Stop polling
   if (pollTimer) {
     clearInterval(pollTimer);
@@ -207,21 +225,27 @@ async function pollCycle(): Promise<void> {
     }
 
     console.log(
-      `[voice-coach] 📊 ${data.phase} | HR:${data.hr} W:${data.watts} CAD:${data.cadence} Z${data.zone} | ${data.elapsed_min}min`,
+      `[voice-coach] 📊 ${data.phase} | HR:${data.hr} W:${data.watts} CAD:${data.cadence} Z${data.zone} | ${data.pct_ftp}%FTP | ${data.elapsed_min}min`,
     );
 
-    // 2. Ask the coach brain
-    const coachText = await getCoachResponse(data);
+    // 2. Flush any rider messages from the listener
+    const riderMessages = flushRiderMessages();
+    if (riderMessages.length > 0) {
+      console.log(`[voice-coach] 🎤 Rider said ${riderMessages.length} thing(s): ${riderMessages.map(m => `"${m.text}"`).join(", ")}`);
+    }
+
+    // 3. Ask the coach brain (includes rider messages)
+    const coachText = await getCoachResponse(data, riderMessages.length > 0 ? riderMessages : undefined);
 
     if (!coachText) {
       // Coach chose silence
       return;
     }
 
-    // 3. Synthesize via ElevenLabs
+    // 4. Synthesize via ElevenLabs
     const audio = await synthesizeElevenLabs(coachText);
 
-    // 4. Play in voice channel
+    // 5. Play in voice channel
     await playCoachAudio(audio);
 
     const elapsed = Date.now() - cycleStart;

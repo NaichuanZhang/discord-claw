@@ -143,6 +143,13 @@ export function isCoachConnected(): boolean {
 }
 
 /**
+ * Get the current voice connection (for the listener to subscribe to audio).
+ */
+export function getCoachConnection(): VoiceConnection | null {
+  return connection;
+}
+
+/**
  * Get the current channel ID.
  */
 export function getCoachChannelId(): string | null {
