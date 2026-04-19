@@ -103,6 +103,34 @@ export function getEvolution(id: string): Evolution | undefined {
   return row ? rowToEvolution(row) : undefined;
 }
 
+/**
+ * Look up an evolution by its GitHub PR number.
+ */
+export function getEvolutionByPR(prNumber: number): Evolution | undefined {
+  const row = getDb()
+    .prepare("SELECT * FROM evolutions WHERE pr_number = ? ORDER BY created_at DESC LIMIT 1")
+    .get(prNumber) as Record<string, unknown> | undefined;
+  return row ? rowToEvolution(row) : undefined;
+}
+
+/**
+ * Resolve an evolution by either its nanoid ID or PR number.
+ * Tries nanoid first, then falls back to PR number if the input looks numeric.
+ */
+export function resolveEvolution(idOrPR: string): Evolution | undefined {
+  // Try nanoid lookup first
+  const byId = getEvolution(idOrPR);
+  if (byId) return byId;
+
+  // If the input looks like a number, try PR number lookup
+  const prNumber = parseInt(idOrPR, 10);
+  if (!isNaN(prNumber) && String(prNumber) === idOrPR.trim()) {
+    return getEvolutionByPR(prNumber);
+  }
+
+  return undefined;
+}
+
 export function getActiveEvolution(): Evolution | undefined {
   const row = getDb()
     .prepare("SELECT * FROM evolutions WHERE status = 'proposing' LIMIT 1")
