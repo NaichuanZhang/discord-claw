@@ -183,14 +183,47 @@ export function createApiRouter(opts: {
         .prepare("SELECT * FROM channel_configs ORDER BY updated_at DESC")
         .all() as Record<string, unknown>[];
 
-      const channels = rows.map((row) => ({
-        channelId: row.channel_id as string,
-        guildId: (row.guild_id as string) ?? undefined,
-        enabled: (row.enabled as number) === 1,
-        systemPrompt: (row.system_prompt as string) ?? undefined,
-        settings: JSON.parse((row.settings as string) || "{}"),
-        updatedAt: row.updated_at as number,
-      }));
+      const channels = rows.map((row) => {
+        const channelId = row.channel_id as string;
+        const guildId = (row.guild_id as string) ?? undefined;
+
+        // Resolve channel and guild names from Discord client cache
+        let name: string | undefined;
+        let guildName: string | undefined;
+
+        if (discordClient?.isReady()) {
+          try {
+            const discordChannel = discordClient.channels?.cache?.get(channelId);
+            if (discordChannel) {
+              name = (discordChannel as any).name ?? undefined;
+              const guild = (discordChannel as any).guild;
+              if (guild) {
+                guildName = guild.name;
+              }
+            }
+            // If we didn't get guild name from channel, try direct lookup
+            if (!guildName && guildId) {
+              const guild = discordClient.guilds?.cache?.get(guildId);
+              if (guild) {
+                guildName = guild.name;
+              }
+            }
+          } catch {
+            // Silently ignore lookup failures — names are best-effort
+          }
+        }
+
+        return {
+          id: channelId,
+          guildId,
+          name,
+          guildName,
+          enabled: (row.enabled as number) === 1,
+          systemPrompt: (row.system_prompt as string) ?? undefined,
+          settings: JSON.parse((row.settings as string) || "{}"),
+          updatedAt: row.updated_at as number,
+        };
+      });
 
       res.json({ channels });
     } catch (err) {

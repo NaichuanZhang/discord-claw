@@ -86,7 +86,17 @@ export default function Channels() {
               <React.Fragment key={ch.id}>
                 <tr>
                   <td style={{ ...S.td, fontFamily: "monospace", fontSize: 12 }}>
-                    {ch.name || ch.id}
+                    {ch.name ? (
+                      <span>
+                        <span style={{ color: C.textDim }}>#</span>
+                        {ch.name}
+                        <span style={{ color: C.textDim, fontSize: 10, marginLeft: 6 }}>
+                          {ch.id}
+                        </span>
+                      </span>
+                    ) : (
+                      ch.id
+                    )}
                   </td>
                   <td style={S.td}>{ch.guildName || ch.guildId || "-"}</td>
                   <td style={S.td}>
