@@ -33,6 +33,19 @@ import { startListening, stopListening, flushRiderMessages } from "./listener.js
 const POLL_INTERVAL_MS = 7_000; // 7 seconds
 
 // ---------------------------------------------------------------------------
+// Intro variations — randomly picked each session
+// ---------------------------------------------------------------------------
+
+const INTRO_VARIATIONS = [
+  "Okay, I am here viz you now. I see eferyzing — ze vatts, ze heart rate, efery pedal stroke. Vun zing ve vill always do, is fight for it efery day. Zat is vat ve do. So, let's go. Los!",
+  "Gut, ve are connected. I have ze numbers in front of me, I see eferyzing from ze car. Today ve vork togezzer, ve push togezzer, ve get stronger togezzer. Surrender is not part of our DNA. Los, let's ride!",
+  "Okay, I'm here. I can see your vatts, your heart rate, eferyzing. Today is about building somesing special. Ve came here viz a big objective and ve vill fight for it efery single day. Are you ready? Komm, let's go!",
+  "Alright, Grischa here in ze car behind you. I see all ze data, I see eferyzing. Remember — ve are always motivated by victory, simply because zat's who ve are. Now let's make zis session count. Los los los!",
+  "Gut, I am viz you now. Ze numbers are coming in, eferyzing looks gut. Listen, I believe in you. I vouldn't be here if I didn't. Efery pedal stroke today matters. Ve fight togezzer, ya? Komm, let's go!",
+  "Okay, radio check. I have you on ze screen, vatts and heart rate coming srough. Today ve don't chust train, ve prepare for somesing bigger. Ze Tour doesn't end until Paris, and our vork doesn't end until ve give eferyzing. Los!",
+];
+
+// ---------------------------------------------------------------------------
 // Config
 // ---------------------------------------------------------------------------
 
@@ -165,10 +178,10 @@ async function startCoachSession(channel: VoiceBasedChannel): Promise<void> {
   pollTimer = setInterval(pollCycle, POLL_INTERVAL_MS);
   console.log(`[voice-coach] Session started — polling every ${POLL_INTERVAL_MS}ms`);
 
-  // Play an intro message after a short delay
+  // Play a random intro message after a short delay
   setTimeout(async () => {
     try {
-      const introText = "Okay, I am here viz you now. I see eferyzing — ze vatts, ze heart rate, efery pedal stroke. Vun zing ve vill always do, is fight for it efery day. Zat is vat ve do. So, let's go. Los!";
+      const introText = INTRO_VARIATIONS[Math.floor(Math.random() * INTRO_VARIATIONS.length)];
       console.log(`[voice-coach] Playing intro: "${introText}"`);
       const audio = await synthesizeElevenLabs(introText);
       await playCoachAudio(audio);
