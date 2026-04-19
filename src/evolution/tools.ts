@@ -148,7 +148,7 @@ export const evolutionTools = [
       properties: {
         id: {
           type: "string",
-          description: "Evolution id to review. If omitted, reviews the most recent proposed evolution.",
+          description: "Evolution id or PR number to review. If omitted, reviews the most recent proposed evolution.",
         },
       },
       required: [],
@@ -163,7 +163,7 @@ export const evolutionTools = [
       properties: {
         id: {
           type: "string",
-          description: "Evolution id to merge",
+          description: "Evolution id or PR number to merge",
         },
       },
       required: ["id"],
@@ -406,14 +406,14 @@ export async function handleEvolutionTool(
       case "evolve_review": {
         const id = input.id as string | undefined;
 
-        // If an evolution id is provided, look it up in DB to get PR number
+        // If an evolution id/PR number is provided, look it up
         if (id) {
           const evolution = getEvolution(id);
           if (!evolution) {
             return JSON.stringify({ error: `Evolution not found: ${id}` });
           }
           if (!evolution.prNumber) {
-            return JSON.stringify({ error: `Evolution ${id} has no PR number.` });
+            return JSON.stringify({ error: `Evolution ${evolution.id} has no PR number.` });
           }
 
           // Fetch live PR data from GitHub
