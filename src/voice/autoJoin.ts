@@ -4,6 +4,8 @@
  * Listens to Discord's `voiceStateUpdate` event and:
  *   - When the tracked user joins a voice channel → bot auto-joins
  *   - When the tracked user leaves a voice channel → bot auto-leaves
+ *
+ * Skips channels handled by other pipelines (e.g., the voice coach channel).
  */
 
 import type { Client, VoiceState } from "discord.js";
@@ -16,6 +18,9 @@ import { getActiveChannelId } from "./connection.js";
 
 let trackedUserId: string | null = null;
 let client: Client | null = null;
+
+/** Channel IDs that are handled by other pipelines (skip auto-join for these) */
+const excludedChannels = new Set<string>();
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -46,6 +51,22 @@ export function disableAutoJoin(): void {
   console.log("[voice:autoJoin] Auto-join disabled");
 }
 
+/**
+ * Exclude a channel ID from auto-join handling.
+ * Used by other pipelines (e.g., voice coach) that manage their own join/leave.
+ */
+export function excludeFromAutoJoin(channelId: string): void {
+  excludedChannels.add(channelId);
+  console.log(`[voice:autoJoin] Excluding channel ${channelId} from auto-join`);
+}
+
+/**
+ * Remove a channel from the exclusion list.
+ */
+export function includeInAutoJoin(channelId: string): void {
+  excludedChannels.delete(channelId);
+}
+
 // ---------------------------------------------------------------------------
 // Event handler
 // ---------------------------------------------------------------------------
@@ -65,6 +86,12 @@ async function handleVoiceStateUpdate(
 
   // User joined or switched to a voice channel
   if (newChannel) {
+    // Skip if this channel is handled by another pipeline
+    if (excludedChannels.has(newChannel)) {
+      console.log(`[voice:autoJoin] Channel ${newChannel} is excluded (handled by another pipeline), skipping`);
+      return;
+    }
+
     // Don't rejoin if we're already in that channel
     const currentBotChannel = getActiveChannelId();
     if (currentBotChannel === newChannel) return;
@@ -92,6 +119,12 @@ async function handleVoiceStateUpdate(
   }
   // User left voice (no new channel)
   else if (oldChannel && !newChannel) {
+    // Skip if this was an excluded channel (the other pipeline handles leave)
+    if (excludedChannels.has(oldChannel)) {
+      console.log(`[voice:autoJoin] Channel ${oldChannel} is excluded, skipping auto-leave`);
+      return;
+    }
+
     // Only leave if we're in the channel they left
     const currentBotChannel = getActiveChannelId();
     if (currentBotChannel === oldChannel && isConnected()) {
