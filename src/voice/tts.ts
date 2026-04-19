@@ -1,20 +1,128 @@
 /**
- * Text-to-Speech client using EigenAI Chatterbox.
+ * Text-to-Speech client using Boson Higgs Audio v2.5 (via EigenAI).
  *
  * Supports two modes:
  * 1. synthesize() — full synthesis, returns complete WAV buffer (legacy)
  * 2. synthesizeStream() — SSE streaming, yields PCM16 chunks as they arrive
  *
+ * Voice cloning: place an mp3/wav reference file at data/voice-reference.mp3
+ * (or set VOICE_REFERENCE_FILE env var). On startup the file is uploaded to
+ * the Higgs upload_voice endpoint and the returned voice_id is cached for
+ * all subsequent TTS requests.
+ *
  * Streaming mode starts playback ~1s earlier than non-streaming.
  */
 
 import { PassThrough } from "node:stream";
+import { readFileSync, existsSync } from "node:fs";
+import { resolve } from "node:path";
 
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
 
-const EIGENAI_TTS_URL = "https://api-web.eigenai.com/api/chatterbox";
+const HIGGS_TTS_URL = "https://api-web.eigenai.com/api/higgs2p5";
+const HIGGS_UPLOAD_VOICE_URL = "https://api-web.eigenai.com/api/higgs2p5/upload_voice";
+
+// ---------------------------------------------------------------------------
+// Voice reference / cloning
+// ---------------------------------------------------------------------------
+
+/** Cached voice_id from uploading the reference file. */
+let cachedVoiceId: string | null = null;
+let voiceIdInitPromise: Promise<void> | null = null;
+
+/**
+ * Resolve the path to the voice reference audio file.
+ * Priority: VOICE_REFERENCE_FILE env var > data/voice-reference.mp3
+ */
+function getVoiceReferencePath(): string | null {
+  if (process.env.VOICE_REFERENCE_FILE) {
+    const p = resolve(process.env.VOICE_REFERENCE_FILE);
+    if (existsSync(p)) return p;
+    console.warn(`[tts] VOICE_REFERENCE_FILE=${p} does not exist, skipping voice cloning`);
+    return null;
+  }
+  const defaultPath = resolve("data/voice-reference.mp3");
+  if (existsSync(defaultPath)) return defaultPath;
+  return null;
+}
+
+/**
+ * Upload the voice reference file to Higgs and cache the returned voice_id.
+ * Called once on first TTS request (lazy init).
+ */
+async function initVoiceId(): Promise<void> {
+  if (cachedVoiceId) return;
+
+  const apiKey = process.env.EIGENAI_API_KEY;
+  if (!apiKey) return;
+
+  const refPath = getVoiceReferencePath();
+  if (!refPath) {
+    console.log("[tts] No voice reference file found — using default Higgs voice");
+    return;
+  }
+
+  console.log(`[tts] Uploading voice reference: ${refPath}`);
+  const startTime = Date.now();
+
+  try {
+    const fileData = readFileSync(refPath);
+    const filename = refPath.split("/").pop() || "voice-reference.mp3";
+
+    const formData = new FormData();
+    formData.append(
+      "voice_reference_file",
+      new Blob([fileData], { type: filename.endsWith(".wav") ? "audio/wav" : "audio/mpeg" }),
+      filename,
+    );
+
+    const response = await fetch(HIGGS_UPLOAD_VOICE_URL, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+      },
+      body: formData,
+    });
+
+    if (!response.ok) {
+      const errText = await response.text().catch(() => "unknown error");
+      console.error(`[tts] ❌ Voice upload failed (${response.status}): ${errText}`);
+      return;
+    }
+
+    const result = (await response.json()) as { voice_id?: string };
+    if (result.voice_id) {
+      cachedVoiceId = result.voice_id;
+      const elapsed = Date.now() - startTime;
+      console.log(`[tts] ✅ Voice reference uploaded in ${elapsed}ms — voice_id: ${cachedVoiceId}`);
+    }
+  } catch (err) {
+    console.error("[tts] ❌ Failed to upload voice reference:", err);
+  }
+}
+
+/**
+ * Ensure voice_id is initialized (one-shot, concurrent-safe).
+ */
+function ensureVoiceId(): Promise<void> {
+  if (!voiceIdInitPromise) {
+    voiceIdInitPromise = initVoiceId();
+  }
+  return voiceIdInitPromise;
+}
+
+/**
+ * Build the JSON body for a Higgs TTS request.
+ */
+function buildRequestBody(text: string): Record<string, unknown> {
+  const body: Record<string, unknown> = { text };
+  if (cachedVoiceId) {
+    body.voice_id = cachedVoiceId;
+  }
+  return body;
+}
 
 // ---------------------------------------------------------------------------
 // Types
@@ -37,7 +145,7 @@ export interface TTSStreamResult {
 // ---------------------------------------------------------------------------
 
 /**
- * Synthesize text to speech using EigenAI Chatterbox.
+ * Synthesize text to speech using Boson Higgs Audio v2.5 (via EigenAI).
  * @param text The text to speak
  * @returns WAV audio buffer
  */
@@ -47,24 +155,27 @@ export async function synthesize(text: string, signal?: AbortSignal): Promise<Bu
     throw new Error("EIGENAI_API_KEY environment variable is not set");
   }
 
+  // Ensure voice reference is uploaded
+  await ensureVoiceId();
+
   console.log(`[tts] Synthesizing ${text.length} chars: "${text.slice(0, 100)}${text.length > 100 ? "..." : ""}"`);
 
   const startTime = Date.now();
 
-  const response = await fetch(EIGENAI_TTS_URL, {
+  const response = await fetch(HIGGS_TTS_URL, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
       Authorization: `Bearer ${apiKey}`,
     },
-    body: JSON.stringify({ text }),
+    body: JSON.stringify(buildRequestBody(text)),
     signal,
   });
 
   if (!response.ok) {
     const errText = await response.text().catch(() => "unknown error");
     console.error(`[tts] ❌ API error ${response.status}: ${errText}`);
-    throw new Error(`EigenAI TTS failed (${response.status}): ${errText}`);
+    throw new Error(`Higgs TTS failed (${response.status}): ${errText}`);
   }
 
   const arrayBuffer = await response.arrayBuffer();
@@ -113,7 +224,7 @@ function createWavHeader(sampleRate: number, channels: number, dataSize: number 
 }
 
 /**
- * Synthesize text to speech using EigenAI Chatterbox with SSE streaming.
+ * Synthesize text to speech using Boson Higgs Audio v2.5 with SSE streaming.
  *
  * Returns a PassThrough stream that emits a WAV header + PCM16 chunks as they arrive.
  * The stream can be directly fed to discord.js createAudioResource().
@@ -140,21 +251,25 @@ export function synthesizeStream(text: string, signal?: AbortSignal): TTSStreamR
   let ttfb = 0;
 
   const done = (async () => {
-    const response = await fetch(EIGENAI_TTS_URL, {
+    // Ensure voice reference is uploaded before first request
+    await ensureVoiceId();
+
+    const streamUrl = `${HIGGS_TTS_URL}?stream=true`;
+    const response = await fetch(streamUrl, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
         Authorization: `Bearer ${apiKey}`,
       },
-      body: JSON.stringify({ text, stream: true }),
+      body: JSON.stringify(buildRequestBody(text)),
       signal,
     });
 
     if (!response.ok) {
       const errText = await response.text().catch(() => "unknown error");
       console.error(`[tts:stream] ❌ API error ${response.status}: ${errText}`);
-      passthrough.destroy(new Error(`EigenAI TTS stream failed (${response.status}): ${errText}`));
-      throw new Error(`EigenAI TTS stream failed (${response.status}): ${errText}`);
+      passthrough.destroy(new Error(`Higgs TTS stream failed (${response.status}): ${errText}`));
+      throw new Error(`Higgs TTS stream failed (${response.status}): ${errText}`);
     }
 
     if (!response.body) {
@@ -193,15 +308,26 @@ export function synthesizeStream(text: string, signal?: AbortSignal): TTSStreamR
           }
 
           // Handle different event types
+          // Higgs v2.5 SSE format:
+          //   { type: "start", creditsCharged, creditsRemaining, estimatedMinutes }
+          //   { type: "metadata", data: { channels, sample_rate, format, ... } }
+          //   { type: "audio_chunk", data: "<base64>", size: N }
+          //   Stream ends when connection closes
           const eventType = event.type || event.data?.type;
 
-          if (eventType === "metadata") {
+          if (eventType === "start") {
+            // Credits/billing info — log but skip
+            if (event.creditsRemaining != null) {
+              console.log(`[tts:stream] Credits remaining: ${event.creditsRemaining}`);
+            }
+          } else if (eventType === "metadata") {
             const meta = event.data || event;
             sampleRate = meta.sample_rate || 24000;
             channels = meta.channels || 1;
             console.log(`[tts:stream] Metadata: ${sampleRate}Hz, ${channels}ch, pcm16`);
           } else if (eventType === "audio_chunk") {
-            const b64Data = event.data?.data || event.data;
+            // Higgs v2.5: data is base64 string directly at event.data
+            const b64Data = typeof event.data === "string" ? event.data : (event.data?.data || event.data);
             if (typeof b64Data === "string") {
               const pcmChunk = Buffer.from(b64Data, "base64");
 
@@ -222,13 +348,23 @@ export function synthesizeStream(text: string, signal?: AbortSignal): TTSStreamR
             const durationSec = totalPcmBytes / (sampleRate * channels * 2);
             console.log(
               `[tts:stream] ✅ Stream complete in ${elapsed}ms (TTFB=${ttfb}ms, chunks=${chunkCount}, ` +
-              `${totalPcmBytes} bytes, ${durationSec.toFixed(2)}s audio) for "${text.slice(0, 50)}"`
+              `${totalPcmBytes} bytes, ${durationSec.toFixed(2)}s audio) for "${text.slice(0, 50)}"`,
             );
           } else if (eventType === "done") {
             // End of stream
             break;
           }
         }
+      }
+
+      // Log completion if no explicit "complete" event was received
+      if (chunkCount > 0 && totalPcmBytes > 0) {
+        const elapsed = Date.now() - startTime;
+        const durationSec = totalPcmBytes / (sampleRate * channels * 2);
+        console.log(
+          `[tts:stream] ✅ Stream finished in ${elapsed}ms (TTFB=${ttfb}ms, chunks=${chunkCount}, ` +
+          `${totalPcmBytes} bytes, ${durationSec.toFixed(2)}s audio) for "${text.slice(0, 50)}"`,
+        );
       }
     } catch (err) {
       if (signal?.aborted) {
