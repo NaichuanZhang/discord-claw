@@ -21,12 +21,16 @@ import {
   setReflectionChannelId,
 } from "./reflection/daemon.js";
 import { initVoice, setVoiceDiscordClient, destroyVoice } from "./voice/index.js";
-import { enableAutoJoin, disableAutoJoin } from "./voice/autoJoin.js";
+import { enableAutoJoin, disableAutoJoin, excludeFromAutoJoin } from "./voice/autoJoin.js";
+import { initVoiceCoach, setVoiceCoachClient, destroyVoiceCoach } from "./voice-coach/index.js";
 import { registerBotThread } from "./bot/messages.js";
 import { ensureThread } from "./shared/discord-utils.js";
 
 // Admin user ID for DM fallback delivery
 const ADMIN_USER_ID = "152801068663832576";
+
+// Voice coach channel ID
+const VOICE_COACH_CHANNEL_ID = "1495515183463006431";
 
 // ---------------------------------------------------------------------------
 // Startup
@@ -69,6 +73,27 @@ async function main(): Promise<void> {
     console.warn("[discordclaw] Voice assistant init failed (non-fatal):", err);
   }
 
+  // 3.9 Initialize voice coach
+  console.log("[discordclaw] Initializing voice coach...");
+  let voiceCoachReady = false;
+  const elevenLabsKey = process.env.ELEVENLABS_API_KEY;
+  const elevenLabsVoiceId = process.env.ELEVENLABS_VOICE_ID;
+  if (elevenLabsKey && elevenLabsVoiceId) {
+    try {
+      initVoiceCoach({
+        channelId: VOICE_COACH_CHANNEL_ID,
+        userId: ADMIN_USER_ID,
+        elevenLabsApiKey: elevenLabsKey,
+        elevenLabsVoiceId: elevenLabsVoiceId,
+      });
+      voiceCoachReady = true;
+    } catch (err) {
+      console.warn("[discordclaw] Voice coach init failed (non-fatal):", err);
+    }
+  } else {
+    console.warn("[discordclaw] Voice coach disabled — ELEVENLABS_API_KEY or ELEVENLABS_VOICE_ID not set");
+  }
+
   // 4. Start cron service
   console.log("[discordclaw] Starting cron service...");
   const cronService = new CronService();
@@ -89,6 +114,16 @@ async function main(): Promise<void> {
 
     // Enable auto-join/leave: bot follows the admin user in/out of voice channels
     enableAutoJoin(client, ADMIN_USER_ID);
+
+    // Exclude the voice coach channel from the regular voice auto-join
+    if (voiceCoachReady) {
+      excludeFromAutoJoin(VOICE_COACH_CHANNEL_ID);
+    }
+  }
+
+  // Wire voice coach → Discord client
+  if (voiceCoachReady) {
+    setVoiceCoachClient(client);
   }
 
   // Wire cron → Discord delivery now that the client is ready
@@ -222,6 +257,7 @@ async function main(): Promise<void> {
   console.log(`[discordclaw] Skills: ${skillService.list().length}`);
   console.log(`[discordclaw] gh CLI: ${ghAvailable ? "ready" : "NOT AVAILABLE"}`);
   console.log(`[discordclaw] Voice: ${voiceReady ? "ready (auto-join enabled)" : "NOT AVAILABLE"}`);
+  console.log(`[discordclaw] Voice Coach: ${voiceCoachReady ? `ready (channel: ${VOICE_COACH_CHANNEL_ID})` : "NOT AVAILABLE"}`);
   console.log(`[discordclaw] mem9: ${mem9Ready ? "enabled (cloud memory)" : "disabled (local only)"}`);
   console.log(`[discordclaw] Reflection: ${reflectionChannelId ? `→ #${reflectionChannelId}` : "no channel (ideas only)"}`);
   console.log(`[discordclaw] Gateway: http://localhost:${port}`);
@@ -242,6 +278,9 @@ async function main(): Promise<void> {
 
     // Disable auto-join before destroying voice
     disableAutoJoin();
+
+    // Stop voice coach
+    destroyVoiceCoach();
 
     // Stop voice assistant
     await destroyVoice();
@@ -274,6 +313,7 @@ async function main(): Promise<void> {
       clearInterval(cleanupInterval);
       stopReflectionDaemon();
       disableAutoJoin();
+      destroyVoiceCoach();
       await destroyVoice();
       cronService.stop();
       stopSoulWatcher();
