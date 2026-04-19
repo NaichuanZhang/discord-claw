@@ -16,7 +16,7 @@ import type { CyclingData } from "./mock-server.js";
 // Constants
 // ---------------------------------------------------------------------------
 
-const COACH_MODEL = "claude-sonnet-4-20250514";
+const COACH_MODEL = process.env.COACH_MODEL || "bedrock-claude-sonnet-4-1m";
 const COACH_MAX_TOKENS = 150;
 
 // ---------------------------------------------------------------------------
