@@ -22,6 +22,7 @@ import {
   isTranscriptionAvailable,
 } from "../audio/transcribe.js";
 import { recordSignal } from "../reflection/signals.js";
+import { acquireSessionLock, SessionAbortedError } from "../agent/session-lock.js";
 import type Anthropic from "@anthropic-ai/sdk";
 
 // ---------------------------------------------------------------------------
@@ -1203,6 +1204,29 @@ export async function handleMessage(message: DiscordMessage): Promise<void> {
     isDM,
   });
 
+  // 8b. Acquire session lock — if another message is being processed for this
+  // session, we wait here until it finishes before proceeding.
+  let signal: AbortSignal;
+  let releaseLock: () => void;
+
+  try {
+    const lock = await acquireSessionLock(session.id);
+    signal = lock.signal;
+    releaseLock = lock.release;
+  } catch (err) {
+    if (err instanceof SessionAbortedError) {
+      console.log(`[bot] Session ${session.id} was aborted while waiting in queue`);
+      return; // Silently drop — the /stop command already notified the user
+    }
+    throw err;
+  }
+
+  // If the session was aborted while we were waiting in the queue
+  if (signal.aborted) {
+    console.log(`[bot] Session ${session.id} aborted before processing started`);
+    return;
+  }
+
   const history = getSessionHistory(session.id);
 
   // Resolve context details
@@ -1258,10 +1282,18 @@ export async function handleMessage(message: DiscordMessage): Promise<void> {
       history,
       channelConfig,
       onToolCallProgress,
+      signal,
     });
     const durationMs = Date.now() - startTime;
 
     stopTyping();
+
+    // Check if aborted during processing
+    if (signal.aborted) {
+      console.log(`[bot] Session ${session.id} was aborted during processing — discarding response`);
+      releaseLock();
+      return;
+    }
 
     // 11. Log both messages to DB (store the full text with images for history)
     const fullResponseText =
@@ -1381,6 +1413,14 @@ export async function handleMessage(message: DiscordMessage): Promise<void> {
     );
   } catch (err) {
     stopTyping();
+
+    // Don't log/report abort errors — they're intentional
+    if (err instanceof SessionAbortedError || signal.aborted) {
+      console.log(`[bot] Session ${session.id} processing aborted`);
+      releaseLock();
+      return;
+    }
+
     console.error("[bot] Error processing message:", err);
 
     // Record error signal for reflection
@@ -1412,5 +1452,7 @@ export async function handleMessage(message: DiscordMessage): Promise<void> {
       // If even the error reply fails, just log it
       console.error("[bot] Failed to send error reply");
     }
+  } finally {
+    releaseLock();
   }
 }

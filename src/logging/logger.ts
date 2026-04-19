@@ -29,6 +29,7 @@ export type LogCategory =
   | "gateway"
   | "memory"
   | "reflection"
+  | "session-lock"
   | "skills"
   | "soul"
   | "voice"

@@ -10,6 +10,7 @@ import { getChannelConfig, setChannelConfig, getDb } from "../db/index.js";
 import { getSoul } from "../soul/soul.js";
 import { triggerRestart } from "../restart.js";
 import { startVoice, stopVoice, isConnected } from "../voice/index.js";
+import { abortAllSessions, getActiveSessionInfo } from "../agent/session-lock.js";
 import type { SkillService } from "../skills/service.js";
 import type { CronService } from "../cron/service.js";
 import type { CronJob, CronSchedule, CronPayload, CronDelivery } from "../cron/types.js";
@@ -80,6 +81,10 @@ export const slashCommands: ApplicationCommandData[] = [
   {
     name: "clear",
     description: "Clear the current session context",
+  },
+  {
+    name: "stop",
+    description: "Stop all active processing sessions",
   },
   {
     name: "soul",
@@ -323,6 +328,9 @@ export async function handleInteraction(interaction: Interaction): Promise<void>
       case "clear":
         await handleClear(interaction);
         break;
+      case "stop":
+        await handleStop(interaction);
+        break;
       case "soul":
         await handleSoul(interaction);
         break;
@@ -537,6 +545,7 @@ async function handleHelp(
           "`/config set-prompt <prompt>` — Set a channel system prompt",
           "`/config toggle` — Enable/disable bot in this channel",
           "`/clear` — Clear the current session",
+          "`/stop` — Stop all active processing sessions",
           "`/soul` — Show the bot personality",
           "`/join` — Join your voice channel as a voice assistant",
           "`/leave` — Leave the voice channel",
@@ -674,6 +683,36 @@ async function handleClear(
     ephemeral: true,
   });
   console.log(`[bot] Session ${session.id} cleared by ${interaction.user.tag}`);
+}
+
+// ---------------------------------------------------------------------------
+// /stop
+// ---------------------------------------------------------------------------
+
+async function handleStop(
+  interaction: import("discord.js").ChatInputCommandInteraction,
+): Promise<void> {
+  const activeSessions = getActiveSessionInfo();
+
+  if (activeSessions.length === 0) {
+    await interaction.reply({
+      content: "No active sessions to stop.",
+      ephemeral: true,
+    });
+    return;
+  }
+
+  const count = abortAllSessions();
+
+  const sessionList = activeSessions
+    .map((s) => `\`${s.sessionId}\`${s.queueLength > 0 ? ` (+${s.queueLength} queued)` : ""}`)
+    .join("\n");
+
+  await interaction.reply({
+    content: `🛑 Stopped **${count}** active session(s):\n${sessionList}`,
+    ephemeral: true,
+  });
+  console.log(`[bot] ${count} session(s) stopped by ${interaction.user.tag}`);
 }
 
 // ---------------------------------------------------------------------------
