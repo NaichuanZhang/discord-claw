@@ -15,7 +15,7 @@ import {
   getBetaDir,
   gh,
 } from "./engine.js";
-import { getActiveEvolution, getEvolution, listEvolutions } from "./log.js";
+import { getActiveEvolution, getEvolution, listEvolutions, resolveEvolution } from "./log.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -406,14 +406,14 @@ export async function handleEvolutionTool(
       case "evolve_review": {
         const id = input.id as string | undefined;
 
-        // If an evolution id is provided, look it up in DB to get PR number
+        // If an evolution id is provided, look it up (supports both nanoid and PR number)
         if (id) {
-          const evolution = getEvolution(id);
+          const evolution = resolveEvolution(id);
           if (!evolution) {
-            return JSON.stringify({ error: `Evolution not found: ${id}` });
+            return JSON.stringify({ error: `Evolution not found: ${id}. Try the nanoid or PR number.` });
           }
           if (!evolution.prNumber) {
-            return JSON.stringify({ error: `Evolution ${id} has no PR number.` });
+            return JSON.stringify({ error: `Evolution ${evolution.id} has no PR number.` });
           }
 
           // Fetch live PR data from GitHub
@@ -487,7 +487,12 @@ export async function handleEvolutionTool(
 
       case "evolve_merge": {
         const id = input.id as string;
-        await mergeEvolution({ id, channelId: _currentChannelId });
+        // Resolve by nanoid or PR number
+        const evolution = resolveEvolution(id);
+        if (!evolution) {
+          return JSON.stringify({ error: `Evolution not found: ${id}. Try the nanoid or PR number.` });
+        }
+        await mergeEvolution({ id: evolution.id, channelId: _currentChannelId });
         return JSON.stringify({
           success: true,
           message: "PR merged. Restarting to deploy...",
