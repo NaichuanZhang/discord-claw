@@ -29,6 +29,12 @@ import { ensureThread } from "./shared/discord-utils.js";
 const ADMIN_USER_ID = "152801068663832576";
 
 // ---------------------------------------------------------------------------
+// Smoke test mode — used by sandbox CI to verify the bot can start up
+// without needing real credentials. Tests: imports, DB init, service wiring.
+// ---------------------------------------------------------------------------
+const SMOKE_TEST = process.env.SMOKE_TEST === "1";
+
+// ---------------------------------------------------------------------------
 // Startup
 // ---------------------------------------------------------------------------
 
@@ -57,6 +63,19 @@ async function main(): Promise<void> {
   const ghAvailable = await checkGhCli();
   if (!ghAvailable) {
     console.warn("[discordclaw] WARNING: gh CLI not authenticated — evolution PRs will fail");
+  }
+
+  // ---------------------------------------------------------------------------
+  // SMOKE TEST EXIT — all imports resolved, DB initialized, services loaded.
+  // Exit before Discord connection (which requires real credentials).
+  // ---------------------------------------------------------------------------
+  if (SMOKE_TEST) {
+    console.log("[discordclaw] ✅ Smoke test passed — all modules loaded, DB initialized, services ready");
+    // Clean up file watchers started by initSoul/initMemory/skillService
+    stopSoulWatcher();
+    stopMemoryWatcher();
+    skillService.stop();
+    process.exit(0);
   }
 
   // 3.8 Initialize voice assistant

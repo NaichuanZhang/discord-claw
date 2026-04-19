@@ -310,7 +310,7 @@ export async function startEvolution(opts: {
  *   1. Run local typecheck as a fast pre-flight (catches obvious errors quickly)
  *   2. Stage + commit + push the branch
  *   3. If Daytona is available: run full validation in an ephemeral sandbox
- *      (clean install, typecheck, tests — true isolation)
+ *      (clean install, typecheck, tests, startup smoke test — true isolation)
  *   4. If Daytona is not available: run tests locally in worktree as fallback
  *   5. Create the PR with quality gate results
  *   6. Clean up worktree
@@ -394,6 +394,9 @@ export async function finalizeEvolution(opts: {
         if (!sandboxResult.testsPassed) {
           errors.push(`**Tests failed:**\n\`\`\`\n${sandboxResult.testsOutput.slice(0, 2000)}\n\`\`\``);
         }
+        if (!sandboxResult.smokeTestPassed) {
+          errors.push(`**Startup smoke test failed:**\n\`\`\`\n${sandboxResult.smokeTestOutput.slice(0, 2000)}\n\`\`\``);
+        }
         throw new Error(
           `Sandbox validation failed (${Math.round(sandboxResult.durationMs / 1000)}s):\n${errors.join("\n\n")}`,
         );
@@ -401,7 +404,7 @@ export async function finalizeEvolution(opts: {
 
       log(`Sandbox validation passed in ${Math.round(sandboxResult.durationMs / 1000)}s`);
     } catch (err: any) {
-      // If the error is a validation failure (tests/typecheck failed), re-throw it
+      // If the error is a validation failure (tests/typecheck/smoke failed), re-throw it
       if (err.message?.includes("Sandbox validation failed")) {
         throw err;
       }
@@ -430,6 +433,7 @@ export async function finalizeEvolution(opts: {
         `- ✅ Pre-flight typecheck passed (local)`,
         `- ✅ TypeScript typecheck passed (sandbox)`,
         `- ✅ Integration tests passed (sandbox)`,
+        `- ✅ Startup smoke test passed (sandbox)`,
         `- ⏱️ Sandbox validation: ${Math.round(sandboxResult.durationMs / 1000)}s`,
         sandboxResult.sandboxId ? `- 🆔 Sandbox: \`${sandboxResult.sandboxId}\`` : "",
       ].filter(Boolean)

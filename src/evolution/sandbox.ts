@@ -2,7 +2,8 @@
 // Daytona Sandbox CI — ephemeral sandbox for evolution validation
 // ---------------------------------------------------------------------------
 // Spins up a Daytona sandbox, clones the evolution branch, installs deps,
-// runs typecheck + tests, and tears down. True isolated CI without GitHub Actions.
+// runs typecheck + tests + startup smoke test, and tears down.
+// True isolated CI without GitHub Actions.
 // ---------------------------------------------------------------------------
 
 import { Daytona, Image } from "@daytona/sdk";
@@ -10,6 +11,7 @@ import { getConfig } from "../db/index.js";
 
 const SANDBOX_TIMEOUT = 300; // 5 min to create sandbox
 const COMMAND_TIMEOUT = 180; // 3 min per command
+const SMOKE_TEST_TIMEOUT = 60; // 1 min for startup smoke test
 const REPO_URL = "https://github.com/NaichuanZhang/discord-claw.git";
 const WORK_DIR = "/home/daytona/repo";
 
@@ -36,8 +38,10 @@ export interface SandboxValidationResult {
   success: boolean;
   typecheckPassed: boolean;
   testsPassed: boolean;
+  smokeTestPassed: boolean;
   typecheckOutput: string;
   testsOutput: string;
+  smokeTestOutput: string;
   sandboxId?: string;
   durationMs: number;
 }
@@ -173,8 +177,55 @@ export async function runSandboxValidation(opts: {
       `Tests: ${testsPassed ? "PASSED" : "FAILED"} (exit ${testsResult.exitCode})`,
     );
 
+    // 6. Startup smoke test — build and verify the bot can initialize
+    //    Uses SMOKE_TEST=1 which causes src/index.ts to exit after DB init,
+    //    soul loading, memory indexing, and skill loading — before Discord.
+    //    Catches: missing modules, broken imports, circular deps, DB schema issues,
+    //    and any top-level initialization crashes.
+    emit("🚀 Running startup smoke test...");
+    log("Building TypeScript and running smoke test...");
+
+    let smokeTestPassed = false;
+    let smokeTestOutput = "";
+
+    // First, build the project (compile TS → dist/)
+    const buildResult = await sandbox.process.executeCommand(
+      "npx tsc 2>&1",
+      WORK_DIR,
+      undefined,
+      COMMAND_TIMEOUT,
+    );
+
+    if (buildResult.exitCode !== 0) {
+      smokeTestOutput = `Build failed:\n${buildResult.result || ""}`;
+      emit("❌ Smoke test failed (build error)");
+      log(`Smoke test: BUILD FAILED (exit ${buildResult.exitCode})`);
+    } else {
+      // Run the compiled entry point with SMOKE_TEST=1
+      // This initializes DB, loads soul, indexes memory, loads skills,
+      // then exits cleanly before attempting Discord connection.
+      const smokeResult = await sandbox.process.executeCommand(
+        "SMOKE_TEST=1 node dist/index.js 2>&1",
+        WORK_DIR,
+        undefined,
+        SMOKE_TEST_TIMEOUT,
+      );
+
+      smokeTestPassed = smokeResult.exitCode === 0;
+      smokeTestOutput = smokeResult.result || "";
+
+      if (smokeTestPassed) {
+        emit("✅ Smoke test passed");
+      } else {
+        emit("❌ Smoke test failed (startup crash)");
+      }
+      log(
+        `Smoke test: ${smokeTestPassed ? "PASSED" : "FAILED"} (exit ${smokeResult.exitCode})`,
+      );
+    }
+
     const durationMs = Date.now() - startTime;
-    const success = typecheckPassed && testsPassed;
+    const success = typecheckPassed && testsPassed && smokeTestPassed;
 
     emit(
       success
@@ -186,8 +237,10 @@ export async function runSandboxValidation(opts: {
       success,
       typecheckPassed,
       testsPassed,
+      smokeTestPassed,
       typecheckOutput: typecheckOutput.slice(0, 4000),
       testsOutput: testsOutput.slice(0, 4000),
+      smokeTestOutput: smokeTestOutput.slice(0, 4000),
       sandboxId,
       durationMs,
     };
