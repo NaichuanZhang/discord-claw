@@ -23,6 +23,7 @@ import {
 } from "../audio/transcribe.js";
 import { recordSignal } from "../reflection/signals.js";
 import { acquireSessionLock, SessionAbortedError } from "../agent/session-lock.js";
+import { registerArtifactFromBuffer } from "../artifacts/index.js";
 import type Anthropic from "@anthropic-ai/sdk";
 
 // ---------------------------------------------------------------------------
@@ -328,10 +329,13 @@ function hasImageAttachments(message: DiscordMessage): boolean {
  * Fetch image attachments from a Discord message and convert them to
  * Anthropic ImageBlockParam content blocks (base64-encoded).
  *
+ * Also registers each image as an input artifact when sessionId is provided.
+ *
  * Skips images that are too large or fail to download.
  */
 async function buildImageContentBlocks(
   message: DiscordMessage,
+  sessionId?: string,
 ): Promise<Anthropic.Messages.ImageBlockParam[]> {
   const imageAttachments = message.attachments.filter((att) => {
     const ct = att.contentType?.toLowerCase() || "";
@@ -375,6 +379,28 @@ async function buildImageContentBlocks(
           data: base64,
         },
       });
+
+      // Register as input artifact (fire-and-forget — don't block on this)
+      if (sessionId) {
+        registerArtifactFromBuffer(
+          {
+            sessionId,
+            direction: "input",
+            filename: attachment.name || "image",
+            mimeType: mediaType,
+            discordUrl: attachment.url,
+            discordMessageId: message.id,
+            sizeBytes: buffer.length,
+            metadata: {
+              width: attachment.width ?? undefined,
+              height: attachment.height ?? undefined,
+            },
+          },
+          buffer,
+        ).catch((err) =>
+          console.error(`[bot] Failed to register image artifact:`, err),
+        );
+      }
 
       console.log(
         `[bot] Loaded image attachment: ${attachment.name} (${mediaType}, ${(buffer.length / 1024).toFixed(0)} KB)`,
@@ -518,9 +544,12 @@ function hasPdfAttachments(message: DiscordMessage): boolean {
 /**
  * Fetch text file attachments and build Anthropic DocumentBlockParam blocks.
  * Uses PlainTextSource for text files.
+ *
+ * Also registers each file as an input artifact when sessionId is provided.
  */
 async function buildTextFileContentBlocks(
   message: DiscordMessage,
+  sessionId?: string,
 ): Promise<Anthropic.Messages.DocumentBlockParam[]> {
   const textAttachments = message.attachments.filter((att) => isTextFileAttachment(att));
 
@@ -547,6 +576,26 @@ async function buildTextFileContentBlocks(
       }
 
       let text = await response.text();
+
+      // Register as input artifact (save full content before truncation)
+      if (sessionId) {
+        const textBuffer = Buffer.from(text, "utf-8");
+        registerArtifactFromBuffer(
+          {
+            sessionId,
+            direction: "input",
+            filename: attachment.name || "file.txt",
+            mimeType: attachment.contentType || "text/plain",
+            discordUrl: attachment.url,
+            discordMessageId: message.id,
+            sizeBytes: textBuffer.length,
+            metadata: { charCount: text.length },
+          },
+          textBuffer,
+        ).catch((err) =>
+          console.error(`[bot] Failed to register text file artifact:`, err),
+        );
+      }
 
       // Truncate if too long
       if (text.length > MAX_TEXT_FILE_CHARS) {
@@ -583,9 +632,12 @@ async function buildTextFileContentBlocks(
 /**
  * Fetch PDF attachments and build Anthropic DocumentBlockParam blocks.
  * Uses Base64PDFSource for PDFs.
+ *
+ * Also registers each PDF as an input artifact when sessionId is provided.
  */
 async function buildPdfContentBlocks(
   message: DiscordMessage,
+  sessionId?: string,
 ): Promise<Anthropic.Messages.DocumentBlockParam[]> {
   const pdfAttachments = message.attachments.filter((att) => isPdfAttachment(att));
 
@@ -624,6 +676,24 @@ async function buildPdfContentBlocks(
         },
         title: attachment.name || undefined,
       });
+
+      // Register as input artifact (fire-and-forget)
+      if (sessionId) {
+        registerArtifactFromBuffer(
+          {
+            sessionId,
+            direction: "input",
+            filename: attachment.name || "document.pdf",
+            mimeType: "application/pdf",
+            discordUrl: attachment.url,
+            discordMessageId: message.id,
+            sizeBytes: buffer.length,
+          },
+          buffer,
+        ).catch((err) =>
+          console.error(`[bot] Failed to register PDF artifact:`, err),
+        );
+      }
 
       console.log(
         `[bot] Loaded PDF: ${attachment.name} (${(buffer.length / 1024).toFixed(0)} KB)`,
@@ -1109,7 +1179,29 @@ export async function handleMessage(message: DiscordMessage): Promise<void> {
     }
   }
 
+  // 7. Create thread if needed (before resolving session so session uses thread ID)
+  let replyTarget: DiscordMessage["channel"] | ThreadChannel = message.channel;
+
+  if (shouldCreateThread) {
+    const thread = await createThreadForReply(message, cleanContent || "[Attachment]");
+    if (thread) {
+      replyTarget = thread;
+      sessionThreadId = thread.id;
+    }
+    // If thread creation fails, fall back to replying in channel directly
+  }
+
+  // 8. Now resolve session with the correct thread ID
+  const session = resolveSession({
+    threadId: sessionThreadId,
+    channelId: message.channelId,
+    userId: message.author.id,
+    guildId: message.guildId || undefined,
+    isDM,
+  });
+
   // 6c. Handle image attachments — build Claude vision content blocks
+  // (Now done AFTER session resolution so we can register artifacts)
   let imageBlocks: Anthropic.Messages.ImageBlockParam[] = [];
   if (hasImages) {
     // Show typing while we fetch images
@@ -1117,7 +1209,7 @@ export async function handleMessage(message: DiscordMessage): Promise<void> {
       message.channel.sendTyping().catch(() => {});
     }
 
-    imageBlocks = await buildImageContentBlocks(message);
+    imageBlocks = await buildImageContentBlocks(message, session.id);
 
     if (imageBlocks.length > 0) {
       console.log(
@@ -1127,6 +1219,7 @@ export async function handleMessage(message: DiscordMessage): Promise<void> {
   }
 
   // 6d. Handle text file & PDF attachments — build Claude document content blocks
+  // (Now done AFTER session resolution so we can register artifacts)
   let documentBlocks: Anthropic.Messages.DocumentBlockParam[] = [];
   if (hasDocuments) {
     // Show typing while we fetch documents
@@ -1135,8 +1228,8 @@ export async function handleMessage(message: DiscordMessage): Promise<void> {
     }
 
     const [textBlocks, pdfBlocks] = await Promise.all([
-      hasTextFiles ? buildTextFileContentBlocks(message) : Promise.resolve([]),
-      hasPdfs ? buildPdfContentBlocks(message) : Promise.resolve([]),
+      hasTextFiles ? buildTextFileContentBlocks(message, session.id) : Promise.resolve([]),
+      hasPdfs ? buildPdfContentBlocks(message, session.id) : Promise.resolve([]),
     ]);
 
     documentBlocks = [...textBlocks, ...pdfBlocks];
@@ -1182,27 +1275,6 @@ export async function handleMessage(message: DiscordMessage): Promise<void> {
   } else {
     messageContent = cleanContent;
   }
-
-  // 7. Create thread if needed (before resolving session so session uses thread ID)
-  let replyTarget: DiscordMessage["channel"] | ThreadChannel = message.channel;
-
-  if (shouldCreateThread) {
-    const thread = await createThreadForReply(message, cleanContent || "[Attachment]");
-    if (thread) {
-      replyTarget = thread;
-      sessionThreadId = thread.id;
-    }
-    // If thread creation fails, fall back to replying in channel directly
-  }
-
-  // 8. Now resolve session with the correct thread ID
-  const session = resolveSession({
-    threadId: sessionThreadId,
-    channelId: message.channelId,
-    userId: message.author.id,
-    guildId: message.guildId || undefined,
-    isDM,
-  });
 
   // 8b. Acquire session lock — if another message is being processed for this
   // session, we wait here until it finishes before proceeding.

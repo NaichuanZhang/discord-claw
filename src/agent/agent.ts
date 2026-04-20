@@ -3,7 +3,7 @@ import { anthropicClient } from "../shared/anthropic.js";
 import { conversationHistoryTools, handleConversationHistoryTool } from "../shared/conversation-history.js";
 import { getSoul } from "../soul/soul.js";
 import { getMemoryTools, handleMemoryTool } from "../memory/tools.js";
-import { discordTools, handleDiscordTool } from "./tools.js";
+import { discordTools, handleDiscordTool, setToolSessionContext } from "./tools.js";
 import { skillTools, handleSkillTool } from "../skills/tools.js";
 import { dangerousTools, handleDangerousTool } from "./dangerous-tools.js";
 import { evolutionTools, handleEvolutionTool, setEvolutionContext } from "../evolution/tools.js";
@@ -500,6 +500,9 @@ export async function processMessage(opts: {
   // Set evolution context so tools know the triggering user
   setEvolutionContext(undefined, opts.context.userId);
 
+  // Set session context so Discord tools (send_file) can register artifacts
+  setToolSessionContext(opts.sessionId);
+
   // Build conversation history and append the current message
   const messages: Anthropic.Messages.MessageParam[] = [
     ...buildMessageHistory(opts.history),
@@ -518,159 +521,164 @@ export async function processMessage(opts: {
   let prevCallSignatures: string[] = [];
   let consecutiveDupes = 0;
 
-  while (true) {
-    // Check for abort between turns
-    checkAbort(opts.signal);
+  try {
+    while (true) {
+      // Check for abort between turns
+      checkAbort(opts.signal);
 
-    turns++;
+      turns++;
 
-    const response = await anthropicClient.messages.create({
-      model,
-      max_tokens: MAX_TOKENS,
-      system: systemPrompt,
-      messages,
-      tools: allTools,
-    });
-
-    // Check for abort after API call
-    checkAbort(opts.signal);
-
-    // Aggregate token usage
-    totalUsage = aggregateUsage(totalUsage, response, response.model);
-
-    // Collect text blocks from the response
-    for (const block of response.content) {
-      if (block.type === "text") {
-        collectedText.push(block.text);
-      }
-    }
-
-    // If the model didn't ask to use a tool, we're done
-    if (response.stop_reason !== "tool_use") {
-      break;
-    }
-
-    // Build signatures for this turn's tool calls
-    const currentSignatures: string[] = [];
-    for (const block of response.content) {
-      if (block.type === "tool_use") {
-        currentSignatures.push(`${block.name}:${JSON.stringify(block.input)}`);
-      }
-    }
-
-    // Check for duplicate calls (same tools+args as previous turn)
-    const isDuplicate =
-      currentSignatures.length > 0 &&
-      currentSignatures.length === prevCallSignatures.length &&
-      currentSignatures.every((sig, i) => sig === prevCallSignatures[i]);
-
-    if (isDuplicate) {
-      consecutiveDupes++;
-      log.warn(
-        `Duplicate tool call detected (${consecutiveDupes}/${MAX_CONSECUTIVE_DUPES})`,
-        { tools: currentSignatures.map((s) => s.split(":")[0]) },
-      );
-    } else {
-      consecutiveDupes = 0;
-    }
-    prevCallSignatures = currentSignatures;
-
-    // If we've hit the dupe limit, force the model to stop looping
-    if (consecutiveDupes >= MAX_CONSECUTIVE_DUPES) {
-      log.warn("Breaking loop — repeated duplicate tool calls", {
-        tools: currentSignatures.map((s) => s.split(":")[0]),
-      });
-
-      // Record as a signal — duplicate loops indicate a potential issue
-      recordSignal({
-        type: "pattern",
-        source: "agent",
-        detail: `Duplicate tool call loop broken: ${currentSignatures[0]?.split(":")[0] || "unknown"}`,
-        metadata: {
-          tools: currentSignatures.map((s) => s.split(":")[0]),
-        },
-        sessionId: opts.sessionId,
-        userId: opts.context.userId,
-      });
-
-      // Give the model one last chance with a nudge instead of tools
-      messages.push({ role: "assistant", content: response.content });
-      messages.push({
-        role: "user",
-        content:
-          "[System: You have called the same tools with identical inputs multiple times. Stop calling tools and produce your final response now using the information you already have.]",
-      });
-      // One final turn without tools to force a text response
-      const final = await anthropicClient.messages.create({
+      const response = await anthropicClient.messages.create({
         model,
         max_tokens: MAX_TOKENS,
         system: systemPrompt,
         messages,
+        tools: allTools,
       });
 
-      // Aggregate usage from the final call too
-      totalUsage = aggregateUsage(totalUsage, final, final.model);
+      // Check for abort after API call
+      checkAbort(opts.signal);
 
-      for (const block of final.content) {
+      // Aggregate token usage
+      totalUsage = aggregateUsage(totalUsage, response, response.model);
+
+      // Collect text blocks from the response
+      for (const block of response.content) {
         if (block.type === "text") {
           collectedText.push(block.text);
         }
       }
-      break;
-    }
 
-    // Process tool calls: append the assistant response, then tool results
-    messages.push({ role: "assistant", content: response.content });
-
-    const toolResults: Anthropic.Messages.ToolResultBlockParam[] = [];
-
-    for (const block of response.content) {
-      if (block.type === "tool_use") {
-        // Check abort before each tool call
-        checkAbort(opts.signal);
-
-        // Fire progress callback: tool starting
-        if (opts.onToolCallProgress) {
-          try {
-            await opts.onToolCallProgress({
-              toolName: block.name,
-              toolInput: block.input as Record<string, unknown>,
-              phase: "start",
-            });
-          } catch (err) {
-            log.error("onToolCallProgress (start) error", err);
-          }
-        }
-
-        const { result } = await executeTool(
-          block.name,
-          block.input as Record<string, unknown>,
-          { sessionId: opts.sessionId, userId: opts.context.userId, toolContext: "interactive" },
-        );
-
-        // Fire progress callback: tool completed with result
-        if (opts.onToolCallProgress) {
-          try {
-            await opts.onToolCallProgress({
-              toolName: block.name,
-              toolInput: block.input as Record<string, unknown>,
-              result,
-              phase: "result",
-            });
-          } catch (err) {
-            log.error("onToolCallProgress (result) error", err);
-          }
-        }
-
-        toolResults.push({
-          type: "tool_result",
-          tool_use_id: block.id,
-          content: result,
-        });
+      // If the model didn't ask to use a tool, we're done
+      if (response.stop_reason !== "tool_use") {
+        break;
       }
-    }
 
-    messages.push({ role: "user", content: toolResults });
+      // Build signatures for this turn's tool calls
+      const currentSignatures: string[] = [];
+      for (const block of response.content) {
+        if (block.type === "tool_use") {
+          currentSignatures.push(`${block.name}:${JSON.stringify(block.input)}`);
+        }
+      }
+
+      // Check for duplicate calls (same tools+args as previous turn)
+      const isDuplicate =
+        currentSignatures.length > 0 &&
+        currentSignatures.length === prevCallSignatures.length &&
+        currentSignatures.every((sig, i) => sig === prevCallSignatures[i]);
+
+      if (isDuplicate) {
+        consecutiveDupes++;
+        log.warn(
+          `Duplicate tool call detected (${consecutiveDupes}/${MAX_CONSECUTIVE_DUPES})`,
+          { tools: currentSignatures.map((s) => s.split(":")[0]) },
+        );
+      } else {
+        consecutiveDupes = 0;
+      }
+      prevCallSignatures = currentSignatures;
+
+      // If we've hit the dupe limit, force the model to stop looping
+      if (consecutiveDupes >= MAX_CONSECUTIVE_DUPES) {
+        log.warn("Breaking loop — repeated duplicate tool calls", {
+          tools: currentSignatures.map((s) => s.split(":")[0]),
+        });
+
+        // Record as a signal — duplicate loops indicate a potential issue
+        recordSignal({
+          type: "pattern",
+          source: "agent",
+          detail: `Duplicate tool call loop broken: ${currentSignatures[0]?.split(":")[0] || "unknown"}`,
+          metadata: {
+            tools: currentSignatures.map((s) => s.split(":")[0]),
+          },
+          sessionId: opts.sessionId,
+          userId: opts.context.userId,
+        });
+
+        // Give the model one last chance with a nudge instead of tools
+        messages.push({ role: "assistant", content: response.content });
+        messages.push({
+          role: "user",
+          content:
+            "[System: You have called the same tools with identical inputs multiple times. Stop calling tools and produce your final response now using the information you already have.]",
+        });
+        // One final turn without tools to force a text response
+        const final = await anthropicClient.messages.create({
+          model,
+          max_tokens: MAX_TOKENS,
+          system: systemPrompt,
+          messages,
+        });
+
+        // Aggregate usage from the final call too
+        totalUsage = aggregateUsage(totalUsage, final, final.model);
+
+        for (const block of final.content) {
+          if (block.type === "text") {
+            collectedText.push(block.text);
+          }
+        }
+        break;
+      }
+
+      // Process tool calls: append the assistant response, then tool results
+      messages.push({ role: "assistant", content: response.content });
+
+      const toolResults: Anthropic.Messages.ToolResultBlockParam[] = [];
+
+      for (const block of response.content) {
+        if (block.type === "tool_use") {
+          // Check abort before each tool call
+          checkAbort(opts.signal);
+
+          // Fire progress callback: tool starting
+          if (opts.onToolCallProgress) {
+            try {
+              await opts.onToolCallProgress({
+                toolName: block.name,
+                toolInput: block.input as Record<string, unknown>,
+                phase: "start",
+              });
+            } catch (err) {
+              log.error("onToolCallProgress (start) error", err);
+            }
+          }
+
+          const { result } = await executeTool(
+            block.name,
+            block.input as Record<string, unknown>,
+            { sessionId: opts.sessionId, userId: opts.context.userId, toolContext: "interactive" },
+          );
+
+          // Fire progress callback: tool completed with result
+          if (opts.onToolCallProgress) {
+            try {
+              await opts.onToolCallProgress({
+                toolName: block.name,
+                toolInput: block.input as Record<string, unknown>,
+                result,
+                phase: "result",
+              });
+            } catch (err) {
+              log.error("onToolCallProgress (result) error", err);
+            }
+          }
+
+          toolResults.push({
+            type: "tool_result",
+            tool_use_id: block.id,
+            content: result,
+          });
+        }
+      }
+
+      messages.push({ role: "user", content: toolResults });
+    }
+  } finally {
+    // Clear session context after processing
+    setToolSessionContext(null);
   }
 
   const rawText = collectedText.join("\n").trim();

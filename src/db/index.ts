@@ -210,6 +210,36 @@ export function initDb(): void {
     `);
   }
 
+  // ---------------------------------------------------------------------------
+  // Migrations — add artifacts table for persistent file tracking
+  // ---------------------------------------------------------------------------
+
+  const hasArtifacts = d.prepare(
+    "SELECT name FROM sqlite_master WHERE type='table' AND name='artifacts'"
+  ).get();
+
+  if (!hasArtifacts) {
+    d.exec(`
+      CREATE TABLE artifacts (
+        id TEXT PRIMARY KEY,
+        session_id TEXT NOT NULL,
+        direction TEXT NOT NULL,
+        filename TEXT NOT NULL,
+        mime_type TEXT,
+        disk_path TEXT NOT NULL,
+        discord_url TEXT,
+        discord_message_id TEXT,
+        size_bytes INTEGER,
+        metadata TEXT,
+        created_at INTEGER NOT NULL
+      );
+
+      CREATE INDEX idx_artifacts_session ON artifacts(session_id);
+      CREATE INDEX idx_artifacts_direction ON artifacts(direction);
+      CREATE INDEX idx_artifacts_created_at ON artifacts(created_at);
+    `);
+  }
+
   // Create indexes (idempotent — CREATE INDEX IF NOT EXISTS)
   d.exec(`
     CREATE INDEX IF NOT EXISTS idx_signals_type ON signals(type);

@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { existsSync } from "node:fs";
 import { PROJECT_ROOT } from "../shared/paths.js";
 import { createApiRouter } from "./api.js";
+import { createArtifactRouter } from "./artifacts.js";
 import type { CronService } from "../cron/service.js";
 import type { SkillService } from "../skills/service.js";
 
@@ -53,12 +54,17 @@ export function startGateway(opts: {
   const apiRouter = createApiRouter({ cronService, skillService, discordClient });
   app.use("/api", apiRouter);
 
+  // ---------- Artifact routes (portal + downloads) ----------
+  // Mounted at root level so /artifacts/:sessionId and /api/artifacts/:sessionId both work
+  const artifactRouter = createArtifactRouter();
+  app.use(artifactRouter);
+
   // ---------- Static files for dashboard SPA ----------
   const uiDistPath = join(PROJECT_ROOT, "dist", "ui");
   if (existsSync(uiDistPath)) {
     app.use(express.static(uiDistPath));
 
-    // SPA fallback: serve index.html for any non-API, non-file route
+    // SPA fallback: serve index.html for any non-API, non-artifact, non-file route
     app.get("*", (_req, res) => {
       const indexPath = join(uiDistPath, "index.html");
       if (existsSync(indexPath)) {
