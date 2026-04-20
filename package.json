@@ -16,10 +16,7 @@
     "@daytona/sdk": "^0.167.0",
     "@discordjs/opus": "^0.10.0",
     "@discordjs/voice": "^0.19.2",
-    "@react-three/drei": "^10.7.7",
-    "@react-three/fiber": "^9.6.0",
     "@types/libsodium-wrappers": "^0.8.2",
-    "@types/three": "^0.184.0",
     "better-sqlite3": "^11.7.0",
     "croner": "^9.0.0",
     "discord.js": "^14.16.3",
@@ -30,7 +27,6 @@
     "nanoid": "^5.0.9",
     "onnxruntime-node": "^1.24.3",
     "openai": "^6.33.0",
-    "three": "^0.184.0",
     "ws": "^8.18.0"
   },
   "devDependencies": {

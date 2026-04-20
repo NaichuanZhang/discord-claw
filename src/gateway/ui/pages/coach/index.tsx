@@ -1,48 +1,10 @@
-import React, { useState, useEffect, useRef, useCallback, Suspense } from "react";
+import React, { useState, useEffect, useRef, useCallback } from "react";
 import type { RideData, CoachMessage } from "./types";
 import { COACH_MESSAGES } from "./constants";
 import { createMockRideGenerator } from "./mockGenerator";
 import StartScreen from "./StartScreen";
 import HUD from "./HUD";
-
-// Lazy load the 3D scene (heavy — Three.js bundle)
-const Scene3D = React.lazy(() => import("./Scene3D"));
-
-// ═══════════════════════════════════════════════════════════════════════
-// Loading screen for 3D scene
-// ═══════════════════════════════════════════════════════════════════════
-
-function SceneLoader() {
-  return (
-    <div
-      style={{
-        width: "100%",
-        height: "100%",
-        background: "radial-gradient(ellipse at center, #0f1a2e, #050812)",
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
-        flexDirection: "column",
-        gap: 16,
-      }}
-    >
-      <div
-        style={{
-          width: 40,
-          height: 40,
-          border: "3px solid rgba(231,76,60,0.2)",
-          borderTopColor: "#e74c3c",
-          borderRadius: "50%",
-          animation: "spin 1s linear infinite",
-        }}
-      />
-      <div style={{ color: "#5a6a8a", fontSize: 12, letterSpacing: 2 }}>LOADING 3D WORLD</div>
-      <style>{`
-        @keyframes spin { to { transform: rotate(360deg); } }
-      `}</style>
-    </div>
-  );
-}
+import Scene3D from "./Scene3D";
 
 // ═══════════════════════════════════════════════════════════════════════
 // Main Coach Component
@@ -57,6 +19,7 @@ export default function Coach() {
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const msgIdRef = useRef(0);
   const wsRef = useRef<WebSocket | null>(null);
+  const autoStarted = useRef(false);
 
   const addCoachMessage = useCallback((text: string, type: CoachMessage["type"]) => {
     const msg: CoachMessage = { id: ++msgIdRef.current, text, type, timestamp: Date.now() };
@@ -118,6 +81,16 @@ export default function Coach() {
     addCoachMessage("Ride complete! Incredible effort 💪🔥", "motivation");
   }, [addCoachMessage]);
 
+  // Auto-start support via URL param: ?autostart=1
+  useEffect(() => {
+    if (autoStarted.current) return;
+    const params = new URLSearchParams(window.location.search);
+    if (params.get("autostart") === "1") {
+      autoStarted.current = true;
+      startRide();
+    }
+  }, [startRide]);
+
   useEffect(() => {
     return () => {
       if (intervalRef.current) clearInterval(intervalRef.current);
@@ -141,18 +114,16 @@ export default function Coach() {
         overflow: "hidden",
       }}
     >
-      {/* 3D Scene (background) */}
+      {/* Canvas Scene (background) */}
       <div style={{ position: "absolute", inset: 0 }}>
-        <Suspense fallback={<SceneLoader />}>
-          <Scene3D
-            speed={data?.speed ?? 0}
-            cadence={data?.cadence ?? 80}
-            gradient={data?.gradient ?? 0}
-            elevation={data?.elevation ?? 150}
-            power={data?.power ?? 0}
-            elapsedTime={data?.elapsedTime ?? 0}
-          />
-        </Suspense>
+        <Scene3D
+          speed={data?.speed ?? 0}
+          cadence={data?.cadence ?? 80}
+          gradient={data?.gradient ?? 0}
+          elevation={data?.elevation ?? 150}
+          power={data?.power ?? 0}
+          elapsedTime={data?.elapsedTime ?? 0}
+        />
       </div>
 
       {/* HUD Overlay */}
