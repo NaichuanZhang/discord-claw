@@ -8,6 +8,15 @@ export default defineConfig({
   build: {
     outDir: "../../../dist/ui",
     emptyOutDir: true,
+    chunkSizeWarningLimit: 1000,
+    rollupOptions: {
+      output: {
+        manualChunks: {
+          three: ["three", "@react-three/fiber", "@react-three/drei"],
+          "framer-motion": ["framer-motion"],
+        },
+      },
+    },
   },
   server: {
     proxy: {
