@@ -99,7 +99,7 @@ Scheduled tasks in `data/cron/jobs.json` (gitignored; seed file tracked). Three 
 
 ### Evolution Engine
 
-Self-modification via GitHub PRs. `src/evolution/engine.ts` manages git worktrees at `beta/`, runs validation, pushes branches, creates PRs via `gh` CLI. Evolution status flow: `idea` → `proposing` → `proposed` (PR open) → `deployed` (merged). Also: `cancelled`, `rejected`, `rolled_back`. On startup, `syncDeployedEvolutions()` checks if proposed PRs were merged. `evolve_merge` merges the PR, posts a deployment notification thread to a configured channel, and triggers restart.
+Self-modification via GitHub PRs. `src/evolution/engine.ts` manages git worktrees at `worktrees/<evolution-id>/`, runs validation, pushes branches, creates PRs via `gh` CLI. A single user can have multiple active evolutions concurrently, each on its own isolated worktree. Evolution status flow: `idea` → `proposing` → `proposed` (PR open) → `deployed` (merged). Also: `cancelled`, `rejected`, `rolled_back`. On startup, `syncDeployedEvolutions()` checks if proposed PRs were merged. `evolve_merge` merges the PR, posts a deployment notification thread to a configured channel, and triggers restart.
 
 **Quality gates in `finalizeEvolution()`:**
 1. Local pre-flight `tsc --noEmit` (fast, catches syntax errors before pushing)
@@ -171,7 +171,7 @@ Shell scripts in `migrations/` run by `start.sh` before build. All idempotent (`
 - **Shared restart trigger**: `src/restart.ts` holds a callback set by `index.ts` and called by `commands.ts` / `api.ts` — avoids circular dependency between entry point and command handlers.
 - **DM dedup**: `bot/client.ts` uses both `messageCreate` and a raw gateway event fallback for DMs, with a Set-based dedup mechanism (discord.js v14 sometimes misses DM events for uncached channels).
 - **All runtime data** lives in `data/` (gitignored): SQLite DB, SOUL.md, memory files, cron store, skills, migration markers.
-- **Evolution isolation**: `beta/` is a git worktree (gitignored). The running bot's source is never modified directly — all changes go through PRs.
+- **Evolution isolation**: `worktrees/<id>/` are git worktrees (gitignored). Each evolution gets its own isolated worktree. A user can have multiple concurrent evolutions. The running bot's source is never modified directly — all changes go through PRs.
 - **Cron delivery separation**: `agentTurn` jobs let the agent handle all delivery. `systemEvent` jobs have results delivered by cron service directly. This prevents duplicate messages outside threads.
 - **Skill vs Code guardrail**: The evolution system prompt includes a mandatory pre-flight decision tree. Before starting code evolution, the agent must evaluate whether the capability can be a skill or soul/memory change. See `EVOLUTION_INSTRUCTIONS` in `src/agent/agent.ts`.
 - **Shared utilities**: `src/shared/` contains extracted helpers used by both the main agent and the voice agent — `paths.ts` (project root resolution), `anthropic.ts` (SDK client factory), `discord-utils.ts` (channel/guild helpers), `conversation-history.ts` (cross-session message loading + conversation history tool definitions). Import from `shared/` when adding code that both pipelines need.

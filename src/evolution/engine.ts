@@ -3,6 +3,7 @@
 // ---------------------------------------------------------------------------
 // Supports multiple concurrent evolutions, each with its own isolated
 // git worktree under worktrees/<evolution-id>/.
+// A single user can have multiple active evolutions simultaneously.
 // All state-mutating operations are protected by an async mutex.
 // ---------------------------------------------------------------------------
 
@@ -17,6 +18,7 @@ import {
   createEvolution,
   getActiveEvolutionForUser,
   getActiveEvolutions,
+  getActiveEvolutionsForUser,
   getEvolution,
   listEvolutions,
   updateEvolution,
@@ -292,8 +294,8 @@ async function cleanupLegacyBeta(): Promise<void> {
  * Start a new evolution session. Creates a git worktree at worktrees/<id>/.
  * Protected by the evolution lock to prevent race conditions.
  *
- * Multiple evolutions can run concurrently, but each user can only have
- * one active evolution at a time.
+ * Multiple evolutions can run concurrently. A single user can have
+ * multiple active evolutions simultaneously, each on its own worktree.
  */
 export async function startEvolution(opts: {
   reason: string;
@@ -301,15 +303,6 @@ export async function startEvolution(opts: {
   channelId?: string;
 }): Promise<Evolution> {
   return evolutionLock.withLock(async () => {
-    // Check if this user already has an active evolution
-    const existing = getActiveEvolutionForUser(opts.triggeredBy);
-    if (existing) {
-      throw new Error(
-        `You already have an active evolution: ${existing.id} (${existing.branch}). ` +
-        `Cancel it first with evolve_cancel, or finish it with evolve_propose.`,
-      );
-    }
-
     // Clean up legacy beta/ if it exists
     await cleanupLegacyBeta();
 
@@ -359,7 +352,9 @@ export async function startEvolution(opts: {
     updateEvolution(evolution.id, { worktreeDir });
     evolution.worktreeDir = worktreeDir;
 
-    log(`Evolution ${evolution.id} started on ${branch} at ${worktreeDir}`);
+    // Log how many active evolutions this user now has
+    const userEvolutions = getActiveEvolutionsForUser(opts.triggeredBy);
+    log(`Evolution ${evolution.id} started on ${branch} at ${worktreeDir} (user now has ${userEvolutions.length} active evolution(s))`);
     return evolution;
   });
 }

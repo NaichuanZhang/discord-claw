@@ -1,8 +1,10 @@
 // ---------------------------------------------------------------------------
 // Evolution tools — agent-facing tools for self-modification
 // ---------------------------------------------------------------------------
-// Supports multiple concurrent evolutions. Each user gets their own worktree.
-// Tool operations resolve the active evolution for the current user.
+// Supports multiple concurrent evolutions per user. Each evolution gets
+// its own worktree. Tools accept an optional `id` parameter to target a
+// specific evolution; when omitted, the most recently created active
+// evolution for the current user is used.
 // ---------------------------------------------------------------------------
 
 import fs from "node:fs";
@@ -21,6 +23,7 @@ import {
 import {
   getActiveEvolutionForUser,
   getActiveEvolutions,
+  getActiveEvolutionsForUser,
   getEvolution,
   listEvolutions,
   resolveEvolution,
@@ -40,7 +43,7 @@ export const evolutionTools = [
   {
     name: "evolve_start",
     description:
-      "Start a new evolution session. Creates an isolated git worktree for making source code changes. All changes will be submitted as a GitHub PR. Each user can have one active evolution at a time, but multiple users can evolve concurrently.",
+      "Start a new evolution session. Creates an isolated git worktree for making source code changes. All changes will be submitted as a GitHub PR. Each user can have multiple active evolutions at a time, but multiple users can evolve concurrently.",
     input_schema: {
       type: "object" as const,
       properties: {
@@ -63,6 +66,10 @@ export const evolutionTools = [
           type: "string",
           description: "File path relative to repo root (e.g. 'src/agent/agent.ts')",
         },
+        id: {
+          type: "string",
+          description: "Evolution id to target. If omitted, uses the most recent active evolution for the current user.",
+        },
       },
       required: ["path"],
     },
@@ -81,6 +88,10 @@ export const evolutionTools = [
         content: {
           type: "string",
           description: "Content to write to the file",
+        },
+        id: {
+          type: "string",
+          description: "Evolution id to target. If omitted, uses the most recent active evolution for the current user.",
         },
       },
       required: ["path", "content"],
@@ -101,6 +112,10 @@ export const evolutionTools = [
           type: "number",
           description: "Timeout in milliseconds (default 30000, max 60000)",
         },
+        id: {
+          type: "string",
+          description: "Evolution id to target. If omitted, uses the most recent active evolution for the current user.",
+        },
       },
       required: ["command"],
     },
@@ -115,6 +130,10 @@ export const evolutionTools = [
         summary: {
           type: "string",
           description: "Short description for the PR title and commit message",
+        },
+        id: {
+          type: "string",
+          description: "Evolution id to propose. If omitted, uses the most recent active evolution for the current user.",
         },
       },
       required: ["summary"],
@@ -142,10 +161,15 @@ export const evolutionTools = [
   {
     name: "evolve_cancel",
     description:
-      "Cancel the current active evolution session. Cleans up the worktree and deletes the branch. Use if you need to abandon an in-progress evolution.",
+      "Cancel an active evolution session. Cleans up the worktree and deletes the branch. Use if you need to abandon an in-progress evolution.",
     input_schema: {
       type: "object" as const,
-      properties: {},
+      properties: {
+        id: {
+          type: "string",
+          description: "Evolution id to cancel. If omitted, cancels the most recent active evolution for the current user.",
+        },
+      },
       required: [],
     },
   },
@@ -206,16 +230,43 @@ export function setEvolutionContext(channelId?: string, userId?: string): void {
 }
 
 // ---------------------------------------------------------------------------
-// Helper: get the current user's active evolution or error
+// Helper: resolve an evolution for the current user
 // ---------------------------------------------------------------------------
 
-function requireActiveEvolution(): Evolution {
+/**
+ * Resolve which evolution to operate on.
+ *
+ * If `explicitId` is provided, look it up directly (must be in "proposing" status
+ * and belong to the current user).
+ *
+ * If `explicitId` is omitted, return the most recent active evolution for
+ * the current user. If the user has multiple active evolutions, include a
+ * hint about the others in the error message.
+ */
+function resolveActiveEvolution(explicitId?: string): Evolution {
   if (!_currentUserId) {
     throw new Error("No user context — cannot determine active evolution.");
   }
 
-  const active = getActiveEvolutionForUser(_currentUserId);
-  if (!active) {
+  if (explicitId) {
+    const evolution = getEvolution(explicitId);
+    if (!evolution) {
+      throw new Error(`Evolution not found: ${explicitId}`);
+    }
+    if (evolution.status !== "proposing") {
+      throw new Error(
+        `Evolution ${explicitId} is not active (status: ${evolution.status}). Only "proposing" evolutions can be modified.`,
+      );
+    }
+    // Allow operating on any evolution (not just the user's own) — the user
+    // explicitly specified the id, so they know what they're doing.
+    return evolution;
+  }
+
+  // No explicit id — find the most recent active evolution for this user
+  const userEvolutions = getActiveEvolutionsForUser(_currentUserId);
+
+  if (userEvolutions.length === 0) {
     // Check if there are other users' active evolutions for a helpful message
     const allActive = getActiveEvolutions();
     if (allActive.length > 0) {
@@ -224,6 +275,18 @@ function requireActiveEvolution(): Evolution {
       );
     }
     throw new Error("No active evolution. Call evolve_start first.");
+  }
+
+  // Use the most recent one (first in the list, since they're ordered DESC)
+  const active = userEvolutions[0];
+
+  // If the user has more than one, include a hint
+  if (userEvolutions.length > 1) {
+    const others = userEvolutions.slice(1).map((e) => `  - ${e.id}: ${e.triggerMessage?.slice(0, 60) ?? "(no reason)"}`);
+    console.log(
+      `[evolution] User ${_currentUserId} has ${userEvolutions.length} active evolutions. ` +
+      `Defaulting to most recent: ${active.id}. Others:\n${others.join("\n")}`,
+    );
   }
 
   return active;
@@ -311,17 +374,38 @@ export async function handleEvolutionTool(
           triggeredBy: _currentUserId ?? "unknown",
           channelId: _currentChannelId,
         });
-        return JSON.stringify({
+
+        // Include info about other active evolutions for the user
+        const userEvolutions = _currentUserId
+          ? getActiveEvolutionsForUser(_currentUserId)
+          : [];
+        const otherActive = userEvolutions.filter((e) => e.id !== evolution.id);
+
+        const response: Record<string, unknown> = {
           success: true,
           evolution_id: evolution.id,
           branch: evolution.branch,
           worktree: evolution.worktreeDir,
           message: `Evolution started. Make changes using evolve_write/evolve_read/evolve_bash, then call evolve_propose to submit the PR.`,
-        });
+        };
+
+        if (otherActive.length > 0) {
+          response.other_active_evolutions = otherActive.map((e) => ({
+            id: e.id,
+            reason: e.triggerMessage?.slice(0, 80),
+          }));
+          response.message =
+            `Evolution started. You now have ${userEvolutions.length} active evolutions. ` +
+            `Use the 'id' parameter on evolve_read/write/bash/propose/cancel to target a specific one, ` +
+            `or omit it to default to the most recent (${evolution.id}).`;
+        }
+
+        return JSON.stringify(response);
       }
 
       case "evolve_read": {
-        const active = requireActiveEvolution();
+        const explicitId = input.id as string | undefined;
+        const active = resolveActiveEvolution(explicitId);
         const worktreeDir = requireWorktreeDir(active);
 
         const filePath = input.path as string;
@@ -343,11 +427,12 @@ export async function handleEvolutionTool(
         }
 
         const content = fs.readFileSync(absPath, "utf-8");
-        return JSON.stringify({ path: filePath, content });
+        return JSON.stringify({ path: filePath, content, evolution_id: active.id });
       }
 
       case "evolve_write": {
-        const active = requireActiveEvolution();
+        const explicitId = input.id as string | undefined;
+        const active = resolveActiveEvolution(explicitId);
         const worktreeDir = requireWorktreeDir(active);
 
         const filePath = input.path as string;
@@ -363,11 +448,12 @@ export async function handleEvolutionTool(
         }
 
         fs.writeFileSync(absPath, content, "utf-8");
-        return JSON.stringify({ success: true, path: filePath });
+        return JSON.stringify({ success: true, path: filePath, evolution_id: active.id });
       }
 
       case "evolve_bash": {
-        const active = requireActiveEvolution();
+        const explicitId = input.id as string | undefined;
+        const active = resolveActiveEvolution(explicitId);
         const worktreeDir = requireWorktreeDir(active);
 
         const command = input.command as string;
@@ -390,18 +476,20 @@ export async function handleEvolutionTool(
             ? stderr.slice(0, MAX_OUTPUT) + "\n... (truncated)"
             : stderr;
 
-          return JSON.stringify({ exit_code: 0, stdout: out, stderr: err || undefined });
+          return JSON.stringify({ exit_code: 0, stdout: out, stderr: err || undefined, evolution_id: active.id });
         } catch (execErr: any) {
           return JSON.stringify({
             exit_code: execErr.code ?? 1,
             stdout: (execErr.stdout || "").slice(0, MAX_OUTPUT),
             stderr: (execErr.stderr || execErr.message || "").slice(0, MAX_OUTPUT),
+            evolution_id: active.id,
           });
         }
       }
 
       case "evolve_propose": {
-        const active = requireActiveEvolution();
+        const explicitId = input.id as string | undefined;
+        const active = resolveActiveEvolution(explicitId);
 
         const summary = input.summary as string;
         const result = await finalizeEvolution({
@@ -414,6 +502,7 @@ export async function handleEvolutionTool(
           success: true,
           pr_url: result.prUrl,
           pr_number: result.prNumber,
+          evolution_id: active.id,
           message: `PR created: ${result.prUrl}`,
         });
       }
@@ -435,10 +524,12 @@ export async function handleEvolutionTool(
       }
 
       case "evolve_cancel": {
-        const active = requireActiveEvolution();
+        const explicitId = input.id as string | undefined;
+        const active = resolveActiveEvolution(explicitId);
         await cancelEvolution(active.id);
         return JSON.stringify({
           success: true,
+          evolution_id: active.id,
           message: `Evolution ${active.id} cancelled.`,
         });
       }

@@ -167,6 +167,17 @@ export function getActiveEvolutionForUser(userId: string): Evolution | undefined
   return row ? rowToEvolution(row) : undefined;
 }
 
+/**
+ * Get ALL active (proposing) evolutions for a specific user.
+ * Returns them ordered by most recent first.
+ */
+export function getActiveEvolutionsForUser(userId: string): Evolution[] {
+  const rows = getDb()
+    .prepare("SELECT * FROM evolutions WHERE status = 'proposing' AND triggered_by = ? ORDER BY created_at DESC")
+    .all(userId) as Record<string, unknown>[];
+  return rows.map(rowToEvolution);
+}
+
 export function listEvolutions(filter?: {
   status?: EvolutionStatus;
 }): Evolution[] {
