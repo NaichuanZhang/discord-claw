@@ -10,8 +10,10 @@ import {
   getArtifact,
   getArtifactDownloadUrl,
   getArtifactPortalUrl,
+  getAllSessionsWithArtifacts,
   formatFileSize,
   type Artifact,
+  type SessionArtifactSummary,
 } from "../artifacts/index.js";
 
 // ---------------------------------------------------------------------------
@@ -35,6 +37,20 @@ function formatDate(ms: number): string {
   });
 }
 
+/** Format a relative time (e.g. "2 hours ago"). */
+function formatRelativeTime(ms: number): string {
+  const diff = Date.now() - ms;
+  const seconds = Math.floor(diff / 1000);
+  const minutes = Math.floor(seconds / 60);
+  const hours = Math.floor(minutes / 60);
+  const days = Math.floor(hours / 24);
+
+  if (days > 0) return `${days}d ago`;
+  if (hours > 0) return `${hours}h ago`;
+  if (minutes > 0) return `${minutes}m ago`;
+  return "just now";
+}
+
 /** MIME type to icon emoji mapping. */
 function getFileIcon(mimeType: string | null, filename: string): string {
   if (!mimeType) {
@@ -54,74 +70,31 @@ function getFileIcon(mimeType: string | null, filename: string): string {
   return "📄";
 }
 
+/** Escape HTML special characters. */
+function escapeHtml(str: string): string {
+  return str
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
 // ---------------------------------------------------------------------------
-// HTML Portal page generator
+// Shared CSS (used by both index and session portal pages)
 // ---------------------------------------------------------------------------
 
-function renderPortalHtml(sessionId: string, artifacts: Artifact[]): string {
-  const inputArtifacts = artifacts.filter((a) => a.direction === "input");
-  const outputArtifacts = artifacts.filter((a) => a.direction === "output");
-
-  const totalSize = artifacts.reduce((sum, a) => sum + (a.sizeBytes || 0), 0);
-  const createdAt = artifacts.length > 0 ? Math.min(...artifacts.map((a) => a.createdAt)) : Date.now();
-
-  function renderArtifactRow(a: Artifact): string {
-    const icon = getFileIcon(a.mimeType, a.filename);
-    const size = a.sizeBytes ? formatFileSize(a.sizeBytes) : "—";
-    const downloadUrl = getArtifactDownloadUrl(a.sessionId, a.id);
-    const date = formatDate(a.createdAt);
-
-    return `
-      <tr>
-        <td class="icon">${icon}</td>
-        <td class="filename">
-          <a href="${downloadUrl}" title="Download ${a.filename}">${escapeHtml(a.filename)}</a>
-          ${a.mimeType ? `<span class="mime">${escapeHtml(a.mimeType)}</span>` : ""}
-        </td>
-        <td class="size">${size}</td>
-        <td class="date">${date}</td>
-        <td class="actions">
-          <a href="${downloadUrl}" class="btn">⬇ Download</a>
-        </td>
-      </tr>`;
-  }
-
-  function renderSection(title: string, emoji: string, items: Artifact[]): string {
-    if (items.length === 0) return "";
-    return `
-      <h2>${emoji} ${title}</h2>
-      <table>
-        <thead>
-          <tr>
-            <th></th>
-            <th>File</th>
-            <th>Size</th>
-            <th>Date</th>
-            <th></th>
-          </tr>
-        </thead>
-        <tbody>
-          ${items.map(renderArtifactRow).join("\n")}
-        </tbody>
-      </table>`;
-  }
-
-  return `<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Artifacts — Session ${sessionId.slice(0, 8)}</title>
-  <style>
+const SHARED_CSS = `
     * { margin: 0; padding: 0; box-sizing: border-box; }
     body {
       font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
       background: #0d1117;
       color: #c9d1d9;
       padding: 2rem;
-      max-width: 900px;
+      max-width: 960px;
       margin: 0 auto;
     }
+    a { color: #58a6ff; text-decoration: none; }
+    a:hover { text-decoration: underline; }
     h1 {
       color: #f0f6fc;
       margin-bottom: 0.5rem;
@@ -138,6 +111,12 @@ function renderPortalHtml(sessionId: string, artifacts: Artifact[]): string {
       margin: 1.5rem 0 0.75rem;
       padding-bottom: 0.5rem;
       border-bottom: 1px solid #21262d;
+    }
+    code {
+      background: #161b22;
+      padding: 0.125rem 0.375rem;
+      border-radius: 4px;
+      font-size: 0.8125rem;
     }
     table {
       width: 100%;
@@ -196,14 +175,172 @@ function renderPortalHtml(sessionId: string, artifacts: Artifact[]): string {
       padding: 3rem;
       font-style: italic;
     }
+    .badge {
+      display: inline-block;
+      padding: 0.125rem 0.5rem;
+      font-size: 0.6875rem;
+      font-weight: 600;
+      border-radius: 10px;
+      text-transform: uppercase;
+      letter-spacing: 0.03em;
+    }
+    .badge-input {
+      background: #1f3a5f;
+      color: #79c0ff;
+    }
+    .badge-output {
+      background: #1a3a2a;
+      color: #7ee787;
+    }
+    .nav {
+      margin-bottom: 1.5rem;
+      font-size: 0.875rem;
+    }
+    .nav a {
+      color: #8b949e;
+    }
+    .nav a:hover {
+      color: #58a6ff;
+    }
     @media (max-width: 600px) {
       body { padding: 1rem; }
       .date { display: none; }
       .mime { display: none; }
     }
-  </style>
+`;
+
+// ---------------------------------------------------------------------------
+// HTML Index page (all sessions with artifacts)
+// ---------------------------------------------------------------------------
+
+function renderIndexHtml(sessions: SessionArtifactSummary[]): string {
+  const totalArtifacts = sessions.reduce((sum, s) => sum + s.artifactCount, 0);
+  const totalSize = sessions.reduce((sum, s) => sum + s.totalSizeBytes, 0);
+
+  function renderSessionRow(s: SessionArtifactSummary): string {
+    const portalUrl = getArtifactPortalUrl(s.sessionId);
+    const lastActive = formatRelativeTime(s.lastCreatedAt);
+    const created = formatDate(s.firstCreatedAt);
+
+    return `
+      <tr>
+        <td class="icon">📂</td>
+        <td class="filename">
+          <a href="${portalUrl}">${escapeHtml(s.sessionId.slice(0, 8))}…</a>
+          <span class="mime">
+            <span class="badge badge-input">↓ ${s.inputCount}</span>
+            <span class="badge badge-output">↑ ${s.outputCount}</span>
+            ${s.channelId ? ` · ch:${escapeHtml(s.channelId.slice(-4))}` : ""}
+          </span>
+        </td>
+        <td class="size">${formatFileSize(s.totalSizeBytes)}</td>
+        <td class="date" title="${created}">${lastActive}</td>
+        <td class="actions">
+          <a href="${portalUrl}" class="btn">Open →</a>
+        </td>
+      </tr>`;
+  }
+
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Artifact Portal — All Sessions</title>
+  <style>${SHARED_CSS}</style>
 </head>
 <body>
+  <h1>📎 Artifact Portal</h1>
+  <p class="meta">
+    ${sessions.length} session${sessions.length !== 1 ? "s" : ""}
+    · ${totalArtifacts} artifact${totalArtifacts !== 1 ? "s" : ""}
+    · ${formatFileSize(totalSize)} total
+  </p>
+
+  ${sessions.length === 0 ? '<p class="empty">No artifacts yet. Files uploaded to or generated by the agent will appear here.</p>' : `
+  <table>
+    <thead>
+      <tr>
+        <th></th>
+        <th>Session</th>
+        <th>Size</th>
+        <th>Last Active</th>
+        <th></th>
+      </tr>
+    </thead>
+    <tbody>
+      ${sessions.map(renderSessionRow).join("\n")}
+    </tbody>
+  </table>`}
+</body>
+</html>`;
+}
+
+// ---------------------------------------------------------------------------
+// HTML Session Portal page (single session's artifacts)
+// ---------------------------------------------------------------------------
+
+function renderPortalHtml(sessionId: string, artifacts: Artifact[]): string {
+  const inputArtifacts = artifacts.filter((a) => a.direction === "input");
+  const outputArtifacts = artifacts.filter((a) => a.direction === "output");
+
+  const totalSize = artifacts.reduce((sum, a) => sum + (a.sizeBytes || 0), 0);
+  const createdAt = artifacts.length > 0 ? Math.min(...artifacts.map((a) => a.createdAt)) : Date.now();
+
+  function renderArtifactRow(a: Artifact): string {
+    const icon = getFileIcon(a.mimeType, a.filename);
+    const size = a.sizeBytes ? formatFileSize(a.sizeBytes) : "—";
+    const downloadUrl = getArtifactDownloadUrl(a.sessionId, a.id);
+    const date = formatDate(a.createdAt);
+
+    return `
+      <tr>
+        <td class="icon">${icon}</td>
+        <td class="filename">
+          <a href="${downloadUrl}" title="Download ${escapeHtml(a.filename)}">${escapeHtml(a.filename)}</a>
+          ${a.mimeType ? `<span class="mime">${escapeHtml(a.mimeType)}</span>` : ""}
+        </td>
+        <td class="size">${size}</td>
+        <td class="date">${date}</td>
+        <td class="actions">
+          <a href="${downloadUrl}" class="btn">⬇ Download</a>
+        </td>
+      </tr>`;
+  }
+
+  function renderSection(title: string, emoji: string, items: Artifact[]): string {
+    if (items.length === 0) return "";
+    return `
+      <h2>${emoji} ${title}</h2>
+      <table>
+        <thead>
+          <tr>
+            <th></th>
+            <th>File</th>
+            <th>Size</th>
+            <th>Date</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody>
+          ${items.map(renderArtifactRow).join("\n")}
+        </tbody>
+      </table>`;
+  }
+
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Artifacts — Session ${escapeHtml(sessionId.slice(0, 8))}</title>
+  <style>${SHARED_CSS}</style>
+</head>
+<body>
+  <nav class="nav">
+    <a href="/artifacts">← All Sessions</a>
+  </nav>
+
   <h1>📎 Artifact Portal</h1>
   <p class="meta">
     Session <code>${escapeHtml(sessionId.slice(0, 8))}…</code>
@@ -219,21 +356,38 @@ function renderPortalHtml(sessionId: string, artifacts: Artifact[]): string {
 </html>`;
 }
 
-/** Escape HTML special characters. */
-function escapeHtml(str: string): string {
-  return str
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;");
-}
-
 // ---------------------------------------------------------------------------
 // Router
 // ---------------------------------------------------------------------------
 
 export function createArtifactRouter(): Router {
   const router = Router();
+
+  // ── JSON API: list all sessions with artifacts ──
+  router.get("/api/artifacts", (_req: Request, res: Response) => {
+    try {
+      const sessions = getAllSessionsWithArtifacts();
+      res.json({
+        count: sessions.length,
+        sessions: sessions.map((s) => ({
+          sessionId: s.sessionId,
+          artifactCount: s.artifactCount,
+          inputCount: s.inputCount,
+          outputCount: s.outputCount,
+          totalSize: formatFileSize(s.totalSizeBytes),
+          totalSizeBytes: s.totalSizeBytes,
+          portalUrl: getArtifactPortalUrl(s.sessionId),
+          firstCreatedAt: s.firstCreatedAt,
+          lastCreatedAt: s.lastCreatedAt,
+          channelId: s.channelId,
+          userId: s.userId,
+        })),
+      });
+    } catch (err) {
+      console.error("[gateway] Error in GET /api/artifacts:", err);
+      res.status(500).json({ error: String(err) });
+    }
+  });
 
   // ── JSON API: list artifacts for a session ──
   router.get("/api/artifacts/:sessionId", (req: Request, res: Response) => {
@@ -325,7 +479,20 @@ export function createArtifactRouter(): Router {
     }
   });
 
-  // ── HTML Portal page ──
+  // ── HTML Index page: all sessions with artifacts ──
+  router.get("/artifacts", (_req: Request, res: Response) => {
+    try {
+      const sessions = getAllSessionsWithArtifacts();
+      const html = renderIndexHtml(sessions);
+      res.setHeader("Content-Type", "text/html");
+      res.send(html);
+    } catch (err) {
+      console.error("[gateway] Error in artifact index:", err);
+      res.status(500).json({ error: String(err) });
+    }
+  });
+
+  // ── HTML Portal page: single session's artifacts ──
   router.get("/artifacts/:sessionId", (req: Request, res: Response) => {
     try {
       const sessionId = param(req, "sessionId");
