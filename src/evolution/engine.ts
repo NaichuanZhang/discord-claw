@@ -1,16 +1,22 @@
 // ---------------------------------------------------------------------------
 // Evolution Engine — worktree lifecycle, git operations, PR creation
 // ---------------------------------------------------------------------------
+// Supports multiple concurrent evolutions, each with its own isolated
+// git worktree under worktrees/<evolution-id>/.
+// All state-mutating operations are protected by an async mutex.
+// ---------------------------------------------------------------------------
 
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { existsSync, symlinkSync, rmSync } from "node:fs";
+import { existsSync, symlinkSync, rmSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
-import { PROJECT_ROOT, BETA_DIR } from "../shared/paths.js";
+import { PROJECT_ROOT, WORKTREES_DIR, getWorktreeDir } from "../shared/paths.js";
 import { triggerRestart } from "../restart.js";
+import { evolutionLock } from "./lock.js";
 import {
   createEvolution,
-  getActiveEvolution,
+  getActiveEvolutionForUser,
+  getActiveEvolutions,
   getEvolution,
   listEvolutions,
   updateEvolution,
@@ -213,12 +219,12 @@ async function waitForMergeReady(prNumber: number): Promise<void> {
 // Local validation (fallback when Daytona is not available)
 // ---------------------------------------------------------------------------
 
-async function runLocalValidation(): Promise<void> {
+async function runLocalValidation(worktreeDir: string): Promise<void> {
   // 1. Run typecheck in worktree
   log("Running typecheck in worktree (local)...");
   try {
     await execFileAsync("npx", ["tsc", "--noEmit"], {
-      cwd: BETA_DIR,
+      cwd: worktreeDir,
       timeout: 60_000,
       maxBuffer: 1024 * 1024,
     });
@@ -231,7 +237,7 @@ async function runLocalValidation(): Promise<void> {
   log("Running integration tests in worktree (local)...");
   try {
     await execFileAsync("npx", ["vitest", "run"], {
-      cwd: BETA_DIR,
+      cwd: worktreeDir,
       timeout: 120_000,
       maxBuffer: 1024 * 1024,
     });
@@ -242,69 +248,125 @@ async function runLocalValidation(): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
+// Worktree cleanup helper
+// ---------------------------------------------------------------------------
+
+/**
+ * Clean up a worktree directory. Tries `git worktree remove` first,
+ * falls back to manual deletion.
+ */
+async function cleanupWorktree(worktreeDir: string): Promise<void> {
+  if (!existsSync(worktreeDir)) return;
+
+  try {
+    await git(["worktree", "remove", worktreeDir, "--force"]);
+  } catch {
+    rmSync(worktreeDir, { recursive: true, force: true });
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Legacy beta/ cleanup
+// ---------------------------------------------------------------------------
+
+/**
+ * Clean up the old beta/ worktree if it exists (migration from single-worktree).
+ */
+async function cleanupLegacyBeta(): Promise<void> {
+  const legacyBeta = join(PROJECT_ROOT, "beta");
+  if (existsSync(legacyBeta)) {
+    log("Cleaning up legacy beta/ worktree...");
+    try {
+      await git(["worktree", "remove", "beta", "--force"]);
+    } catch {
+      rmSync(legacyBeta, { recursive: true, force: true });
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Engine functions
 // ---------------------------------------------------------------------------
 
 /**
- * Start a new evolution session. Creates a git worktree at beta/.
+ * Start a new evolution session. Creates a git worktree at worktrees/<id>/.
+ * Protected by the evolution lock to prevent race conditions.
+ *
+ * Multiple evolutions can run concurrently, but each user can only have
+ * one active evolution at a time.
  */
 export async function startEvolution(opts: {
   reason: string;
   triggeredBy: string;
   channelId?: string;
 }): Promise<Evolution> {
-  // Check for active evolution
-  const active = getActiveEvolution();
-  if (active) {
-    throw new Error(
-      `Evolution already in progress: ${active.id} (${active.branch}). Cancel it first with evolve_cancel.`,
-    );
-  }
-
-  // Clean up orphaned worktree if it exists
-  if (existsSync(BETA_DIR)) {
-    log("Cleaning up orphaned beta/ worktree...");
-    try {
-      await git(["worktree", "remove", "beta", "--force"]);
-    } catch {
-      rmSync(BETA_DIR, { recursive: true, force: true });
+  return evolutionLock.withLock(async () => {
+    // Check if this user already has an active evolution
+    const existing = getActiveEvolutionForUser(opts.triggeredBy);
+    if (existing) {
+      throw new Error(
+        `You already have an active evolution: ${existing.id} (${existing.branch}). ` +
+        `Cancel it first with evolve_cancel, or finish it with evolve_propose.`,
+      );
     }
-  }
 
-  // Create branch name
-  const slug = slugify(opts.reason);
-  const ts = Date.now();
-  const branch = `evolve/${slug}-${ts}`;
+    // Clean up legacy beta/ if it exists
+    await cleanupLegacyBeta();
 
-  // Create evolution record
-  const evolution = createEvolution({
-    triggeredBy: opts.triggeredBy,
-    triggerMessage: opts.reason,
-    branch,
-    status: "proposing",
+    // Create branch name
+    const slug = slugify(opts.reason);
+    const ts = Date.now();
+    const branch = `evolve/${slug}-${ts}`;
+
+    // Create evolution record first to get the ID
+    const evolution = createEvolution({
+      triggeredBy: opts.triggeredBy,
+      triggerMessage: opts.reason,
+      branch,
+      status: "proposing",
+    });
+
+    // Determine worktree directory
+    const worktreeDir = getWorktreeDir(evolution.id);
+
+    // Clean up orphaned worktree if it exists at this path
+    if (existsSync(worktreeDir)) {
+      log(`Cleaning up orphaned worktree at ${worktreeDir}...`);
+      await cleanupWorktree(worktreeDir);
+    }
+
+    // Ensure worktrees base directory exists
+    if (!existsSync(WORKTREES_DIR)) {
+      mkdirSync(WORKTREES_DIR, { recursive: true });
+    }
+
+    // Create worktree
+    log(`Creating worktree at ${worktreeDir} on branch ${branch}`);
+    await git(["worktree", "add", worktreeDir, "-b", branch]);
+
+    // Symlink node_modules so typecheck works in worktree
+    const worktreeNodeModules = join(worktreeDir, "node_modules");
+    const mainNodeModules = join(PROJECT_ROOT, "node_modules");
+    if (
+      worktreeNodeModules !== mainNodeModules &&
+      !existsSync(worktreeNodeModules) &&
+      existsSync(mainNodeModules)
+    ) {
+      symlinkSync(mainNodeModules, worktreeNodeModules);
+    }
+
+    // Store worktree dir in the evolution record
+    updateEvolution(evolution.id, { worktreeDir });
+    evolution.worktreeDir = worktreeDir;
+
+    log(`Evolution ${evolution.id} started on ${branch} at ${worktreeDir}`);
+    return evolution;
   });
-
-  // Create worktree
-  log(`Creating worktree at beta/ on branch ${branch}`);
-  await git(["worktree", "add", "beta", "-b", branch]);
-
-  // Symlink node_modules so typecheck works in worktree
-  const worktreeNodeModules = join(BETA_DIR, "node_modules");
-  const mainNodeModules = join(PROJECT_ROOT, "node_modules");
-  if (
-    worktreeNodeModules !== mainNodeModules &&
-    !existsSync(worktreeNodeModules) &&
-    existsSync(mainNodeModules)
-  ) {
-    symlinkSync(mainNodeModules, worktreeNodeModules);
-  }
-
-  log(`Evolution ${evolution.id} started on ${branch}`);
-  return evolution;
 }
 
 /**
  * Finalize an evolution: commit, push, validate (sandbox or local), create PR.
+ * Protected by the evolution lock.
  *
  * Flow:
  *   1. Run local typecheck as a fast pre-flight (catches obvious errors quickly)
@@ -325,17 +387,18 @@ export async function finalizeEvolution(opts: {
     throw new Error(`No active evolution with id ${opts.id}`);
   }
 
-  if (!existsSync(BETA_DIR)) {
-    throw new Error("beta/ worktree does not exist");
+  const worktreeDir = evolution.worktreeDir;
+  if (!worktreeDir || !existsSync(worktreeDir)) {
+    throw new Error(`Worktree does not exist for evolution ${opts.id} (expected at ${worktreeDir})`);
   }
 
   // ---------------------------------------------------------------------------
   // 1. Local pre-flight typecheck (fast, catches syntax errors before pushing)
   // ---------------------------------------------------------------------------
-  log("Running local pre-flight typecheck...");
+  log(`Running local pre-flight typecheck for ${opts.id}...`);
   try {
     await execFileAsync("npx", ["tsc", "--noEmit"], {
-      cwd: BETA_DIR,
+      cwd: worktreeDir,
       timeout: 60_000,
       maxBuffer: 1024 * 1024,
     });
@@ -348,11 +411,11 @@ export async function finalizeEvolution(opts: {
   // ---------------------------------------------------------------------------
   // 2. Stage, commit, push
   // ---------------------------------------------------------------------------
-  await git(["add", "-A"], { cwd: BETA_DIR });
+  await git(["add", "-A"], { cwd: worktreeDir });
 
   const { stdout: diffOutput } = await git(
     ["diff", "--cached", "--name-only"],
-    { cwd: BETA_DIR },
+    { cwd: worktreeDir },
   );
   const filesChanged = diffOutput
     .split("\n")
@@ -364,11 +427,11 @@ export async function finalizeEvolution(opts: {
 
   await git(
     ["commit", "-m", `feat(evolution): ${opts.summary}`],
-    { cwd: BETA_DIR },
+    { cwd: worktreeDir },
   );
 
   log(`Pushing branch ${evolution.branch}...`);
-  await git(["push", "-u", "origin", evolution.branch!], { cwd: BETA_DIR });
+  await git(["push", "-u", "origin", evolution.branch!], { cwd: worktreeDir });
 
   // ---------------------------------------------------------------------------
   // 3. Validate: Daytona sandbox (preferred) or local fallback
@@ -411,13 +474,13 @@ export async function finalizeEvolution(opts: {
       // If sandbox infrastructure failed (API down, timeout, etc.), fall back to local
       log(`Sandbox CI infrastructure error, falling back to local: ${err.message}`);
       validationMethod = "local";
-      await runLocalValidation();
+      await runLocalValidation(worktreeDir);
       log("Local fallback validation passed");
     }
   } else {
     validationMethod = "local";
     log("Daytona not configured — running local validation...");
-    await runLocalValidation();
+    await runLocalValidation(worktreeDir);
     log("Local validation passed");
   }
 
@@ -494,10 +557,12 @@ export async function finalizeEvolution(opts: {
   });
 
   // ---------------------------------------------------------------------------
-  // 6. Clean up worktree
+  // 6. Clean up worktree (inside lock to prevent races)
   // ---------------------------------------------------------------------------
-  log("Cleaning up worktree...");
-  await git(["worktree", "remove", "beta", "--force"]);
+  log(`Cleaning up worktree for evolution ${opts.id}...`);
+  await evolutionLock.withLock(async () => {
+    await cleanupWorktree(worktreeDir);
+  });
 
   // ---------------------------------------------------------------------------
   // 7. Notify Discord
@@ -520,38 +585,37 @@ export async function finalizeEvolution(opts: {
 
 /**
  * Cancel an active evolution. Cleans up worktree and branch.
+ * Protected by the evolution lock.
  */
 export async function cancelEvolution(id: string): Promise<void> {
-  const evolution = getEvolution(id);
-  if (!evolution) {
-    throw new Error(`Evolution not found: ${id}`);
-  }
-
-  // Remove worktree if it exists
-  if (existsSync(BETA_DIR)) {
-    try {
-      await git(["worktree", "remove", "beta", "--force"]);
-    } catch {
-      rmSync(BETA_DIR, { recursive: true, force: true });
+  return evolutionLock.withLock(async () => {
+    const evolution = getEvolution(id);
+    if (!evolution) {
+      throw new Error(`Evolution not found: ${id}`);
     }
-  }
 
-  // Delete branch locally and remotely
-  if (evolution.branch) {
-    try {
-      await git(["branch", "-D", evolution.branch]);
-    } catch {
-      // Branch may not exist locally
+    // Remove worktree if it exists
+    if (evolution.worktreeDir) {
+      await cleanupWorktree(evolution.worktreeDir);
     }
-    try {
-      await git(["push", "origin", "--delete", evolution.branch]);
-    } catch {
-      // Branch may not exist remotely
-    }
-  }
 
-  updateEvolution(id, { status: "cancelled" });
-  log(`Evolution ${id} cancelled`);
+    // Delete branch locally and remotely
+    if (evolution.branch) {
+      try {
+        await git(["branch", "-D", evolution.branch]);
+      } catch {
+        // Branch may not exist locally
+      }
+      try {
+        await git(["push", "origin", "--delete", evolution.branch]);
+      } catch {
+        // Branch may not exist remotely
+      }
+    }
+
+    updateEvolution(id, { status: "cancelled" });
+    log(`Evolution ${id} cancelled`);
+  });
 }
 
 /**
@@ -651,6 +715,7 @@ export function recordSuggestion(opts: {
 
 /**
  * On startup, check if any proposed evolutions have been merged.
+ * Also cleans up any orphaned worktrees.
  */
 export async function syncDeployedEvolutions(): Promise<number> {
   const proposed = listEvolutions({ status: "proposed" });
@@ -703,14 +768,41 @@ export async function syncDeployedEvolutions(): Promise<number> {
     }
   }
 
+  // Clean up orphaned worktrees for evolutions that are no longer active
+  await cleanupOrphanedWorktrees();
+
+  // Clean up legacy beta/ directory
+  await cleanupLegacyBeta();
+
   return deployed;
 }
 
 /**
- * Get the path to the beta worktree.
+ * Clean up worktrees for evolutions that are no longer in 'proposing' status.
  */
-export function getBetaDir(): string {
-  return BETA_DIR;
+async function cleanupOrphanedWorktrees(): Promise<void> {
+  if (!existsSync(WORKTREES_DIR)) return;
+
+  const { readdirSync } = await import("node:fs");
+  const entries = readdirSync(WORKTREES_DIR);
+
+  for (const entry of entries) {
+    const worktreeDir = join(WORKTREES_DIR, entry);
+    const evolution = getEvolution(entry);
+
+    // If evolution doesn't exist or is no longer active, clean up
+    if (!evolution || evolution.status !== "proposing") {
+      log(`Cleaning up orphaned worktree: ${worktreeDir}`);
+      await cleanupWorktree(worktreeDir);
+    }
+  }
+}
+
+/**
+ * Get the worktree directory for a specific evolution.
+ */
+export function getEvolutionWorktreeDir(evolutionId: string): string {
+  return getWorktreeDir(evolutionId);
 }
 
 /**

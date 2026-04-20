@@ -1,6 +1,9 @@
 // ---------------------------------------------------------------------------
 // Evolution tools — agent-facing tools for self-modification
 // ---------------------------------------------------------------------------
+// Supports multiple concurrent evolutions. Each user gets their own worktree.
+// Tool operations resolve the active evolution for the current user.
+// ---------------------------------------------------------------------------
 
 import fs from "node:fs";
 import path from "node:path";
@@ -12,10 +15,17 @@ import {
   cancelEvolution,
   mergeEvolution,
   recordSuggestion,
-  getBetaDir,
+  getEvolutionWorktreeDir,
   gh,
 } from "./engine.js";
-import { getActiveEvolution, getEvolution, listEvolutions, resolveEvolution } from "./log.js";
+import {
+  getActiveEvolutionForUser,
+  getActiveEvolutions,
+  getEvolution,
+  listEvolutions,
+  resolveEvolution,
+  type Evolution,
+} from "./log.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -30,7 +40,7 @@ export const evolutionTools = [
   {
     name: "evolve_start",
     description:
-      "Start a new evolution session. Creates an isolated git worktree at beta/ for making source code changes. All changes will be submitted as a GitHub PR. Only one evolution can be active at a time.",
+      "Start a new evolution session. Creates an isolated git worktree for making source code changes. All changes will be submitted as a GitHub PR. Each user can have one active evolution at a time, but multiple users can evolve concurrently.",
     input_schema: {
       type: "object" as const,
       properties: {
@@ -45,7 +55,7 @@ export const evolutionTools = [
   {
     name: "evolve_read",
     description:
-      "Read a file from the beta/ worktree during an active evolution. Use this to understand existing code before modifying it.",
+      "Read a file from the worktree during an active evolution. Use this to understand existing code before modifying it.",
     input_schema: {
       type: "object" as const,
       properties: {
@@ -60,7 +70,7 @@ export const evolutionTools = [
   {
     name: "evolve_write",
     description:
-      "Write a file in the beta/ worktree during an active evolution. Creates parent directories as needed. For source code changes to src/, TypeScript files, start.sh, or migrations.",
+      "Write a file in the worktree during an active evolution. Creates parent directories as needed. For source code changes to src/, TypeScript files, start.sh, or migrations.",
     input_schema: {
       type: "object" as const,
       properties: {
@@ -79,13 +89,13 @@ export const evolutionTools = [
   {
     name: "evolve_bash",
     description:
-      "Execute a shell command in the beta/ worktree context during an active evolution. Use for running typecheck, inspecting state, etc.",
+      "Execute a shell command in the worktree context during an active evolution. Use for running typecheck, inspecting state, etc.",
     input_schema: {
       type: "object" as const,
       properties: {
         command: {
           type: "string",
-          description: "The shell command to execute (cwd is beta/)",
+          description: "The shell command to execute (cwd is the evolution worktree)",
         },
         timeout: {
           type: "number",
@@ -175,17 +185,16 @@ export const evolutionTools = [
 // Path safety for worktree
 // ---------------------------------------------------------------------------
 
-function safeWorktreePath(relativePath: string): string | null {
-  const betaDir = getBetaDir();
-  const resolved = path.resolve(betaDir, relativePath);
-  if (!resolved.startsWith(betaDir + "/") && resolved !== betaDir) {
+function safeWorktreePath(worktreeDir: string, relativePath: string): string | null {
+  const resolved = path.resolve(worktreeDir, relativePath);
+  if (!resolved.startsWith(worktreeDir + "/") && resolved !== worktreeDir) {
     return null; // Path traversal attempt
   }
   return resolved;
 }
 
 // ---------------------------------------------------------------------------
-// Context for tracking the triggering channel
+// Context for tracking the triggering channel/user
 // ---------------------------------------------------------------------------
 
 let _currentChannelId: string | undefined;
@@ -194,6 +203,48 @@ let _currentUserId: string | undefined;
 export function setEvolutionContext(channelId?: string, userId?: string): void {
   _currentChannelId = channelId;
   _currentUserId = userId;
+}
+
+// ---------------------------------------------------------------------------
+// Helper: get the current user's active evolution or error
+// ---------------------------------------------------------------------------
+
+function requireActiveEvolution(): Evolution {
+  if (!_currentUserId) {
+    throw new Error("No user context — cannot determine active evolution.");
+  }
+
+  const active = getActiveEvolutionForUser(_currentUserId);
+  if (!active) {
+    // Check if there are other users' active evolutions for a helpful message
+    const allActive = getActiveEvolutions();
+    if (allActive.length > 0) {
+      throw new Error(
+        `No active evolution for you. There ${allActive.length === 1 ? "is" : "are"} ${allActive.length} other active evolution(s). Call evolve_start first.`,
+      );
+    }
+    throw new Error("No active evolution. Call evolve_start first.");
+  }
+
+  return active;
+}
+
+/**
+ * Get the worktree directory for an active evolution.
+ * Throws if the worktree doesn't exist.
+ */
+function requireWorktreeDir(evolution: Evolution): string {
+  const worktreeDir = evolution.worktreeDir;
+  if (!worktreeDir) {
+    throw new Error(`Evolution ${evolution.id} has no worktree directory recorded.`);
+  }
+  if (!fs.existsSync(worktreeDir)) {
+    throw new Error(
+      `Worktree for evolution ${evolution.id} does not exist at ${worktreeDir}. ` +
+      `The evolution may be corrupted — try cancelling and starting fresh.`,
+    );
+  }
+  return worktreeDir;
 }
 
 // ---------------------------------------------------------------------------
@@ -264,18 +315,17 @@ export async function handleEvolutionTool(
           success: true,
           evolution_id: evolution.id,
           branch: evolution.branch,
+          worktree: evolution.worktreeDir,
           message: `Evolution started. Make changes using evolve_write/evolve_read/evolve_bash, then call evolve_propose to submit the PR.`,
         });
       }
 
       case "evolve_read": {
-        const active = getActiveEvolution();
-        if (!active) {
-          return JSON.stringify({ error: "No active evolution. Call evolve_start first." });
-        }
+        const active = requireActiveEvolution();
+        const worktreeDir = requireWorktreeDir(active);
 
         const filePath = input.path as string;
-        const absPath = safeWorktreePath(filePath);
+        const absPath = safeWorktreePath(worktreeDir, filePath);
         if (!absPath) {
           return JSON.stringify({ error: "Invalid path — must be within the repository" });
         }
@@ -297,14 +347,12 @@ export async function handleEvolutionTool(
       }
 
       case "evolve_write": {
-        const active = getActiveEvolution();
-        if (!active) {
-          return JSON.stringify({ error: "No active evolution. Call evolve_start first." });
-        }
+        const active = requireActiveEvolution();
+        const worktreeDir = requireWorktreeDir(active);
 
         const filePath = input.path as string;
         const content = input.content as string;
-        const absPath = safeWorktreePath(filePath);
+        const absPath = safeWorktreePath(worktreeDir, filePath);
         if (!absPath) {
           return JSON.stringify({ error: "Invalid path — must be within the repository" });
         }
@@ -319,10 +367,8 @@ export async function handleEvolutionTool(
       }
 
       case "evolve_bash": {
-        const active = getActiveEvolution();
-        if (!active) {
-          return JSON.stringify({ error: "No active evolution. Call evolve_start first." });
-        }
+        const active = requireActiveEvolution();
+        const worktreeDir = requireWorktreeDir(active);
 
         const command = input.command as string;
         const timeout = Math.min(
@@ -334,7 +380,7 @@ export async function handleEvolutionTool(
           const { stdout, stderr } = await execFileAsync(
             "/bin/bash",
             ["-c", command],
-            { cwd: getBetaDir(), timeout, maxBuffer: 1024 * 1024 },
+            { cwd: worktreeDir, timeout, maxBuffer: 1024 * 1024 },
           );
 
           const out = stdout.length > MAX_OUTPUT
@@ -355,10 +401,7 @@ export async function handleEvolutionTool(
       }
 
       case "evolve_propose": {
-        const active = getActiveEvolution();
-        if (!active) {
-          return JSON.stringify({ error: "No active evolution. Call evolve_start first." });
-        }
+        const active = requireActiveEvolution();
 
         const summary = input.summary as string;
         const result = await finalizeEvolution({
@@ -392,10 +435,7 @@ export async function handleEvolutionTool(
       }
 
       case "evolve_cancel": {
-        const active = getActiveEvolution();
-        if (!active) {
-          return JSON.stringify({ error: "No active evolution to cancel." });
-        }
+        const active = requireActiveEvolution();
         await cancelEvolution(active.id);
         return JSON.stringify({
           success: true,

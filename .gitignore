@@ -6,4 +6,5 @@ data/
 reference/
 .claude-design/
 beta/
+worktrees/
 claude-history.md

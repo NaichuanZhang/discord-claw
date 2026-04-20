@@ -23,6 +23,7 @@ export interface Evolution {
   triggeredBy: string | null;
   triggerMessage: string | null;
   branch: string | null;
+  worktreeDir: string | null;
   prUrl: string | null;
   prNumber: number | null;
   status: EvolutionStatus;
@@ -44,6 +45,7 @@ function rowToEvolution(row: Record<string, unknown>): Evolution {
     triggeredBy: (row.triggered_by as string) ?? null,
     triggerMessage: (row.trigger_message as string) ?? null,
     branch: (row.branch as string) ?? null,
+    worktreeDir: (row.worktree_dir as string) ?? null,
     prUrl: (row.pr_url as string) ?? null,
     prNumber: (row.pr_number as number) ?? null,
     status: row.status as EvolutionStatus,
@@ -66,6 +68,7 @@ export function createEvolution(opts: {
   triggeredBy: string;
   triggerMessage?: string;
   branch?: string;
+  worktreeDir?: string;
   status?: EvolutionStatus;
 }): Evolution {
   const id = nanoid();
@@ -74,16 +77,17 @@ export function createEvolution(opts: {
 
   getDb()
     .prepare(
-      `INSERT INTO evolutions (id, triggered_by, trigger_message, branch, status, created_at)
-       VALUES (?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO evolutions (id, triggered_by, trigger_message, branch, worktree_dir, status, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
     )
-    .run(id, opts.triggeredBy, opts.triggerMessage ?? null, opts.branch ?? null, status, now);
+    .run(id, opts.triggeredBy, opts.triggerMessage ?? null, opts.branch ?? null, opts.worktreeDir ?? null, status, now);
 
   return {
     id,
     triggeredBy: opts.triggeredBy,
     triggerMessage: opts.triggerMessage ?? null,
     branch: opts.branch ?? null,
+    worktreeDir: opts.worktreeDir ?? null,
     prUrl: null,
     prNumber: null,
     status,
@@ -131,10 +135,35 @@ export function resolveEvolution(idOrPR: string): Evolution | undefined {
   return undefined;
 }
 
+/**
+ * Get the single active (proposing) evolution, if any.
+ * @deprecated Use getActiveEvolutions() for multi-worktree support.
+ */
 export function getActiveEvolution(): Evolution | undefined {
   const row = getDb()
     .prepare("SELECT * FROM evolutions WHERE status = 'proposing' LIMIT 1")
     .get() as Record<string, unknown> | undefined;
+  return row ? rowToEvolution(row) : undefined;
+}
+
+/**
+ * Get all active (proposing) evolutions.
+ */
+export function getActiveEvolutions(): Evolution[] {
+  const rows = getDb()
+    .prepare("SELECT * FROM evolutions WHERE status = 'proposing' ORDER BY created_at DESC")
+    .all() as Record<string, unknown>[];
+  return rows.map(rowToEvolution);
+}
+
+/**
+ * Get the active evolution for a specific user.
+ * Returns the most recent "proposing" evolution triggered by this user.
+ */
+export function getActiveEvolutionForUser(userId: string): Evolution | undefined {
+  const row = getDb()
+    .prepare("SELECT * FROM evolutions WHERE status = 'proposing' AND triggered_by = ? ORDER BY created_at DESC LIMIT 1")
+    .get(userId) as Record<string, unknown> | undefined;
   return row ? rowToEvolution(row) : undefined;
 }
 
@@ -169,6 +198,7 @@ export function updateEvolution(
   fields: Partial<{
     status: EvolutionStatus;
     branch: string;
+    worktreeDir: string;
     prUrl: string;
     prNumber: number;
     changesSummary: string;
@@ -188,6 +218,10 @@ export function updateEvolution(
   if (fields.branch !== undefined) {
     setClauses.push("branch = ?");
     params.push(fields.branch);
+  }
+  if (fields.worktreeDir !== undefined) {
+    setClauses.push("worktree_dir = ?");
+    params.push(fields.worktreeDir);
   }
   if (fields.prUrl !== undefined) {
     setClauses.push("pr_url = ?");

@@ -240,6 +240,17 @@ export function initDb(): void {
     `);
   }
 
+  // ---------------------------------------------------------------------------
+  // Migrations — add worktree_dir column to evolutions for multi-worktree support
+  // ---------------------------------------------------------------------------
+
+  const evolutionColumns = d.prepare("PRAGMA table_info(evolutions)").all() as { name: string }[];
+  const hasWorktreeDir = evolutionColumns.some((c) => c.name === "worktree_dir");
+
+  if (!hasWorktreeDir) {
+    d.exec(`ALTER TABLE evolutions ADD COLUMN worktree_dir TEXT`);
+  }
+
   // Create indexes (idempotent — CREATE INDEX IF NOT EXISTS)
   d.exec(`
     CREATE INDEX IF NOT EXISTS idx_signals_type ON signals(type);
