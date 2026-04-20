@@ -38,6 +38,21 @@ export interface RegisterArtifactOpts {
   metadata?: Record<string, unknown>;
 }
 
+/** Summary of a session's artifacts for the index page. */
+export interface SessionArtifactSummary {
+  sessionId: string;
+  artifactCount: number;
+  inputCount: number;
+  outputCount: number;
+  totalSizeBytes: number;
+  firstCreatedAt: number;
+  lastCreatedAt: number;
+  /** Channel ID from the sessions table (if available). */
+  channelId: string | null;
+  /** User ID from the sessions table (if available). */
+  userId: string | null;
+}
+
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
@@ -225,6 +240,43 @@ export function getArtifact(id: string): Artifact | undefined {
     .prepare("SELECT * FROM artifacts WHERE id = ?")
     .get(id) as Record<string, unknown> | undefined;
   return row ? rowToArtifact(row) : undefined;
+}
+
+/**
+ * Get a summary of all sessions that have artifacts, ordered by most recent activity.
+ * Joins with the sessions table to get channel/user info when available.
+ */
+export function getAllSessionsWithArtifacts(): SessionArtifactSummary[] {
+  const rows = getDb()
+    .prepare(
+      `SELECT
+        a.session_id,
+        COUNT(*) as artifact_count,
+        SUM(CASE WHEN a.direction = 'input' THEN 1 ELSE 0 END) as input_count,
+        SUM(CASE WHEN a.direction = 'output' THEN 1 ELSE 0 END) as output_count,
+        COALESCE(SUM(a.size_bytes), 0) as total_size_bytes,
+        MIN(a.created_at) as first_created_at,
+        MAX(a.created_at) as last_created_at,
+        s.channel_id,
+        s.user_id
+      FROM artifacts a
+      LEFT JOIN sessions s ON a.session_id = s.id
+      GROUP BY a.session_id
+      ORDER BY last_created_at DESC`,
+    )
+    .all() as Record<string, unknown>[];
+
+  return rows.map((row) => ({
+    sessionId: row.session_id as string,
+    artifactCount: row.artifact_count as number,
+    inputCount: row.input_count as number,
+    outputCount: row.output_count as number,
+    totalSizeBytes: row.total_size_bytes as number,
+    firstCreatedAt: row.first_created_at as number,
+    lastCreatedAt: row.last_created_at as number,
+    channelId: (row.channel_id as string) ?? null,
+    userId: (row.user_id as string) ?? null,
+  }));
 }
 
 /**
