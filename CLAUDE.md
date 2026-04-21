@@ -35,11 +35,11 @@ To add new tests, create files matching `tests/**/*.test.ts`.
 
 ## Architecture
 
-This is a Discord bot that uses Claude as its AI backend. The system has major subsystems that initialize sequentially in `src/index.ts`: dotenv → database → soul → memory FTS5 indexing → skills → `gh` CLI check → voice assistant → cron → Discord client → gateway server → health check → evolution sync → session cleanup → reflection daemon.
+This is a Discord bot that uses Claude as its AI backend. The system has major subsystems that initialize sequentially in `src/index.ts`: dotenv → database → soul → memory FTS5 indexing → skills → `gh` CLI check → voice coach → voice assistant → cron → Discord client → gateway server → health check → evolution sync → session cleanup → reflection daemon.
 
 ### Bot → Agent → Claude API Pipeline
 
-Discord messages flow through `bot/messages.ts` (filter, session resolve, thread creation, voice transcription, context build) → `agent/agent.ts` (system prompt assembly, tool loop with duplicate detection) → Anthropic SDK. The agent accepts an optional `onToolCallProgress` callback that fires for each tool invocation (start + result phases); `messages.ts` uses this to send real-time tool call status messages to Discord as the agentic loop runs. The agent returns an `AgentResponse` with text, extracted images (from markdown `![](url)` syntax), and aggregated token usage. `messages.ts` renders images as Discord embeds (URLs) or attachments (local files), and stores usage data alongside the assistant message in SQLite. Tool progress messages are rate-limited (max 4 per 5s window) and batched to respect Discord limits.
+Discord messages flow through `bot/messages.ts` (filter, session resolve, thread creation, voice transcription, artifact registration, context build) → `agent/agent.ts` (system prompt assembly, tool loop with duplicate detection) → Anthropic SDK. The agent accepts an optional `onToolCallProgress` callback that fires for each tool invocation (start + result phases); `messages.ts` uses this to send real-time tool call status messages to Discord as the agentic loop runs. The agent returns an `AgentResponse` with text, extracted images (from markdown `![](url)` syntax), and aggregated token usage. `messages.ts` renders images as Discord embeds (URLs) or attachments (local files), and stores usage data alongside the assistant message in SQLite. Tool progress messages are rate-limited (max 4 per 5s window) and batched to respect Discord limits.
 
 Key constants in `agent/agent.ts`: `DEFAULT_MODEL = "bedrock-claude-opus-4-7-1m"`, `MAX_TOKENS = 16384`, `MAX_CONSECUTIVE_DUPES = 2` (breaks infinite tool loops).
 
@@ -75,11 +75,39 @@ Tool availability configurable via `VOICE_TOOLS_MODE`:
 - `full` (default): memory, conversation history, Discord, skills, bash, file I/O — everything except evolution tools
 - `minimal`: memory + conversation history only
 
-`autoJoin.ts` tracks a configured user and auto-joins/leaves their voice channel. STT/TTS require `EIGENAI_API_KEY`.
+`autoJoin.ts` tracks a configured user and auto-joins/leaves their voice channel. STT/TTS require `EIGENAI_API_KEY`. Voice cloning supported via `VOICE_REFERENCE_FILE` env var (or default `data/voice-reference.mp3`).
 
 Key voice constants: `SILENCE_DURATION_MS = 800` (configurable via `VOICE_SILENCE_MS`), `MIN_UTTERANCE_MS = 500` (configurable via `VOICE_MIN_UTTERANCE_MS`), `IDLE_TIMEOUT_MS = 10min` (auto-leave), `VOICE_MAX_TOKENS = 512` (configurable via `VOICE_MAX_TOKENS`), `MAX_TOOL_ROUNDS = 5`, `MAX_VOICE_HISTORY = 10` turns. Streaming TTS pipelining enabled by default (disable with `VOICE_TTS_STREAM=0`).
 
 Separate from voice chat: `audio/transcribe.ts` handles Discord voice message transcription (audio attachments) via OpenAI's Whisper API.
+
+### Voice Coach
+
+`src/voice-coach/` implements an AI cycling coach that runs independently of the voice assistant. It auto-joins a dedicated voice channel when a tracked rider connects (via `voiceStateUpdate` listener).
+
+**Pipeline**: Every 7 seconds, the orchestrator polls simulated cycling telemetry from `mock-server.ts` (power, heart rate, cadence, speed, elapsed time) → feeds data + rider speech messages to `coach-brain.ts` (LLM with team sport director persona, configurable via `COACH_MODEL`, default: `bedrock-claude-sonnet-4-1m`) → if coach has something to say → `elevenlabs-tts.ts` synthesizes speech → `player.ts` plays audio in the voice channel.
+
+**Rider speech**: `listener.ts` reuses the voice assistant's receiver, VAD, and STT components. Rider audio is captured, speech boundaries detected via Silero VAD, transcribed via EigenAI Whisper, and queued as timestamped messages. The coach brain reads and flushes the queue each poll cycle.
+
+**Key files**:
+- `index.ts` — Orchestrator: `initVoiceCoach()`, `setVoiceCoachClient()`, auto-join/leave on `voiceStateUpdate`, 7s poll loop
+- `coach-brain.ts` — LLM decision engine: system prompt with German-accented team radio persona, maintains rolling telemetry + coach history, responds with coaching text or `[SILENCE]`
+- `elevenlabs-tts.ts` — ElevenLabs TTS client for coach voice synthesis
+- `player.ts` — Voice channel connection management + audio playback (separate from voice assistant's player)
+- `listener.ts` — Rider speech capture via VAD+STT, queued for coach brain consumption
+- `mock-server.ts` — Simulated cycling telemetry generator
+
+Requires `ELEVENLABS_API_KEY` and `ELEVENLABS_VOICE_ID`. The coach channel ID and tracked user ID are currently hardcoded in `src/index.ts`.
+
+### Artifacts
+
+`src/artifacts/index.ts` provides persistent file storage for tracking session inputs (uploaded files) and outputs (generated files). Files are stored on disk at `data/artifacts/<sessionId>/` with metadata in SQLite.
+
+**Key functions**: `registerArtifactFromBuffer()`, `registerArtifactFromFile()`, `updateArtifactDiscordInfo()`, `getSessionArtifacts()`, `getArtifact()`, `getAllSessionsWithArtifacts()`.
+
+**Gateway integration**: `src/gateway/artifacts.ts` exposes REST API routes (`/api/artifacts`, `/api/artifacts/:sessionId`, `/api/artifacts/:sessionId/:artifactId`) and file serving. Dashboard Artifacts page (`src/gateway/ui/pages/Artifacts.tsx`) provides per-session browsing. Uses `GATEWAY_PUBLIC_URL` for generating download URLs in production.
+
+**Message pipeline integration**: `bot/messages.ts` calls `registerArtifactFromBuffer()` to track file attachments uploaded by users.
 
 ### Session Management
 
@@ -115,7 +143,7 @@ The sandbox approach provides true CI isolation — clean `npm ci` install, no s
 `src/logging/` provides a lightweight structured logging system with three SQLite-backed log streams:
 
 | Table | Purpose | Retention |
-|-------|---------|-----------| 
+|-------|---------|-----------|
 | `application_log` | General operational events (info, warn, debug) | 7 days |
 | `error_log` | Errors & exceptions with stack traces | 30 days |
 | `tool_call_log` | Every tool invocation with input, result, timing, success/failure | 7 days |
@@ -142,7 +170,7 @@ The reflection daemon automatically consumes structured logs alongside signals, 
 
 ### Gateway
 
-Express server + WebSocket at `/ws/logs` for real-time log streaming. REST API at `/api/*` exposes CRUD for sessions, channels, config, soul, memory, skills, cron, and evolutions. Health check at `/api/health` (no auth). Auth middleware is currently disabled (TODO for cloud gateway). React SPA dashboard served from `dist/ui/`.
+Express server + WebSocket at `/ws/logs` for real-time log streaming. REST API at `/api/*` exposes CRUD for sessions, channels, config, soul, memory, skills, cron, artifacts, and evolutions. Artifact routes are mounted separately via `src/gateway/artifacts.ts`. Health check at `/api/health` (no auth). Auth middleware is currently disabled (TODO for cloud gateway). React SPA dashboard served from `dist/ui/`.
 
 ### Database Schema
 
@@ -156,6 +184,7 @@ SQLite with WAL mode, FKs enabled. Key tables in `src/db/index.ts`:
 - `signals` — reflection event collection (type, source, detail, metadata JSON)
 - `reflection_runs` — reflection daemon run history
 - `message_history` — archived messages from deleted/expired sessions (preserves conversation history across cleanup)
+- `artifacts` — file tracking (session_id, direction, filename, mime_type, disk_path, discord_url, size_bytes, metadata)
 - `application_log` — structured application log entries (level, category, message, metadata)
 - `error_log` — structured error log entries with stack traces
 - `tool_call_log` — tool invocation records with input, result, timing, success/failure status
@@ -170,7 +199,7 @@ Shell scripts in `migrations/` run by `start.sh` before build. All idempotent (`
 - **Singleton services**: `getDb()`, `getSoul()`, `getSkillService()` are module-level singletons. The Discord client reference is passed via setter functions (`setDiscordClient`, `setMessageClient`) to avoid circular deps.
 - **Shared restart trigger**: `src/restart.ts` holds a callback set by `index.ts` and called by `commands.ts` / `api.ts` — avoids circular dependency between entry point and command handlers.
 - **DM dedup**: `bot/client.ts` uses both `messageCreate` and a raw gateway event fallback for DMs, with a Set-based dedup mechanism (discord.js v14 sometimes misses DM events for uncached channels).
-- **All runtime data** lives in `data/` (gitignored): SQLite DB, SOUL.md, memory files, cron store, skills, migration markers.
+- **All runtime data** lives in `data/` (gitignored): SQLite DB, SOUL.md, memory files, cron store, skills, artifacts, migration markers.
 - **Evolution isolation**: `worktrees/<id>/` are git worktrees (gitignored). Each evolution gets its own isolated worktree. A user can have multiple concurrent evolutions. The running bot's source is never modified directly — all changes go through PRs.
 - **Cron delivery separation**: `agentTurn` jobs let the agent handle all delivery. `systemEvent` jobs have results delivered by cron service directly. This prevents duplicate messages outside threads.
 - **Skill vs Code guardrail**: The evolution system prompt includes a mandatory pre-flight decision tree. Before starting code evolution, the agent must evaluate whether the capability can be a skill or soul/memory change. See `EVOLUTION_INSTRUCTIONS` in `src/agent/agent.ts`.
@@ -181,6 +210,7 @@ Shell scripts in `migrations/` run by `start.sh` before build. All idempotent (`
 - **Token usage**: Aggregated across all API calls within a single user→response turn (including tool-use loops). Costs computed at query time (not stored) so pricing can be updated without migration.
 - **Production deployment**: `start.sh` runs: kill existing → git pull → npm ci (if lockfile changed) → migrations → seed cron → build → start → health check (30s timeout) → auto-rollback on failure. Discord webhook notifications on success/failure.
 - **Dynamic tool registration**: Some tools are conditionally registered based on config (e.g., mem9 tools only appear when `data/skills/mem9/auth.json` exists). Tool lists are built via functions (`getMemoryTools()`, `getAllTools()`, `getCronTools()`) rather than static arrays.
+- **Voice coach independence**: The voice coach (`src/voice-coach/`) is a fully separate pipeline from the voice assistant (`src/voice/`). They share receiver/VAD/STT components but have independent connections, players, and LLM backends. The coach uses ElevenLabs TTS while the assistant uses EigenAI Chatterbox TTS.
 
 ## Skill vs Code Decision Guide
 
@@ -194,6 +224,4 @@ Skills are preferred over code when possible: they're cheaper, safer, instantly 
 
 ## Environment
 
-`reference/` contains the upstream openclaw source (read-only) — useful for understanding original patterns when this fork diverges. It is not part of the build.
-
-Requires either `ANTHROPIC_API_KEY` or `ANTHROPIC_BASE_URL` + `ANTHROPIC_AUTH_TOKEN` (for proxy). `DISCORD_BOT_TOKEN` is always required. `OPENAI_API_KEY` is optional — enables voice message transcription via Whisper. `EIGENAI_API_KEY` is optional — enables voice assistant STT/TTS via EigenAI. `REFLECTION_CHANNEL_ID` is optional — sets the Discord channel where reflection daemon posts proposals. `GATEWAY_PORT` defaults to 3000. `GATEWAY_TOKEN` configures API auth (currently disabled). `DAYTONA_API_KEY` is optional — enables Daytona sandbox CI for evolution validation (falls back to local if not set). `DAYTONA_API_URL` defaults to `https://app.daytona.io/api`. Voice tuning: `VOICE_MODEL` (supports `eigen:<model>` prefix for Eigen LLM), `VOICE_SILENCE_MS` (default 800), `VOICE_MIN_UTTERANCE_MS` (default 500), `VOICE_MAX_TOKENS` (default 512), `VOICE_DEBUG` (default on), `VOICE_TTS_STREAM` (default on), `VOICE_TOOLS_MODE` (`full` or `minimal`, default `full`). Reflection tuning: `REFLECTION_INTERVAL_HOURS`, `REFLECTION_LOOKBACK_HOURS`, `REFLECTION_MIN_SIGNALS` (default 3), `REFLECTION_MODEL`. mem9 cloud memory: configured via `data/skills/mem9/auth.json` (contains `api_key`), not via `.env`. See `.env.example`.
+Requires either `ANTHROPIC_API_KEY` or `ANTHROPIC_BASE_URL` + `ANTHROPIC_AUTH_TOKEN` (for proxy). `DISCORD_BOT_TOKEN` is always required. `OPENAI_API_KEY` is optional — enables voice message transcription via Whisper. `EIGENAI_API_KEY` is optional — enables voice assistant STT/TTS via EigenAI. `ELEVENLABS_API_KEY` + `ELEVENLABS_VOICE_ID` are optional — enable voice coach TTS. `COACH_MODEL` configures the coach brain LLM (default: `bedrock-claude-sonnet-4-1m`). `REFLECTION_CHANNEL_ID` is optional — sets the Discord channel where reflection daemon posts proposals. `GATEWAY_PORT` defaults to 3000. `GATEWAY_TOKEN` configures API auth (currently disabled). `GATEWAY_PUBLIC_URL` overrides the default localhost URL for artifact download links. `DAYTONA_API_KEY` is optional — enables Daytona sandbox CI for evolution validation (falls back to local if not set). `DAYTONA_API_URL` defaults to `https://app.daytona.io/api`. Voice tuning: `VOICE_MODEL` (supports `eigen:<model>` prefix for Eigen LLM), `VOICE_SILENCE_MS` (default 800), `VOICE_MIN_UTTERANCE_MS` (default 500), `VOICE_MAX_TOKENS` (default 512), `VOICE_DEBUG` (default on), `VOICE_TTS_STREAM` (default on), `VOICE_TOOLS_MODE` (`full` or `minimal`, default `full`), `VOICE_REFERENCE_FILE` (TTS voice cloning reference audio). Reflection tuning: `REFLECTION_INTERVAL_HOURS`, `REFLECTION_LOOKBACK_HOURS`, `REFLECTION_MIN_SIGNALS` (default 3), `REFLECTION_MODEL`. mem9 cloud memory: configured via `data/skills/mem9/auth.json` (contains `api_key`), not via `.env`. See `.env.example`.
