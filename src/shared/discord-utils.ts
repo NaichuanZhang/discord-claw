@@ -1,5 +1,6 @@
 // ---------------------------------------------------------------------------
-// Shared Discord utility functions — thread creation, channel type checks
+// Shared Discord utility functions — thread creation, channel type checks,
+// message splitting
 // ---------------------------------------------------------------------------
 
 import { registerBotThread } from "../bot/messages.js";
@@ -16,6 +17,9 @@ const GUILD_ANNOUNCEMENT = 5;
 /** Discord's max thread name length. */
 export const MAX_THREAD_NAME_LENGTH = 100;
 
+/** Discord's max message length (2000 characters). */
+export const DISCORD_MAX_LENGTH = 2000;
+
 // ---------------------------------------------------------------------------
 // Channel type helpers
 // ---------------------------------------------------------------------------
@@ -27,6 +31,62 @@ export const MAX_THREAD_NAME_LENGTH = 100;
  */
 export function isGuildTextChannel(channel: any): boolean {
   return channel.type === GUILD_TEXT || channel.type === GUILD_ANNOUNCEMENT;
+}
+
+// ---------------------------------------------------------------------------
+// Message splitting
+// ---------------------------------------------------------------------------
+
+/**
+ * Split a long message into chunks that fit within Discord's 2000-char limit.
+ * Tries to split at newline boundaries, then spaces, then hard-splits as a
+ * last resort.
+ */
+export function splitMessage(text: string): string[] {
+  if (text.length <= DISCORD_MAX_LENGTH) return [text];
+
+  const chunks: string[] = [];
+  let remaining = text;
+
+  while (remaining.length > 0) {
+    if (remaining.length <= DISCORD_MAX_LENGTH) {
+      chunks.push(remaining);
+      break;
+    }
+
+    // Try to split at a newline boundary within the limit
+    let splitIndex = remaining.lastIndexOf("\n", DISCORD_MAX_LENGTH);
+    if (splitIndex <= 0) {
+      // Fall back to splitting at a space
+      splitIndex = remaining.lastIndexOf(" ", DISCORD_MAX_LENGTH);
+    }
+    if (splitIndex <= 0) {
+      // Hard split at the limit
+      splitIndex = DISCORD_MAX_LENGTH;
+    }
+
+    chunks.push(remaining.slice(0, splitIndex));
+    remaining = remaining.slice(splitIndex).trimStart();
+  }
+
+  return chunks;
+}
+
+/**
+ * Send a potentially-long text message to a Discord channel, automatically
+ * splitting into multiple messages if it exceeds 2000 characters.
+ *
+ * @param target  Any object with a `.send(text)` method (channel or thread).
+ * @param text    The full message text.
+ */
+export async function sendChunked(
+  target: { send: (content: string) => Promise<unknown> },
+  text: string,
+): Promise<void> {
+  const chunks = splitMessage(text);
+  for (const chunk of chunks) {
+    await target.send(chunk);
+  }
 }
 
 // ---------------------------------------------------------------------------

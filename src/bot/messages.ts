@@ -22,6 +22,7 @@ import {
   isTranscriptionAvailable,
 } from "../audio/transcribe.js";
 import { recordSignal } from "../reflection/signals.js";
+import { splitMessage, DISCORD_MAX_LENGTH } from "../shared/discord-utils.js";
 import { acquireSessionLock, SessionAbortedError } from "../agent/session-lock.js";
 import { registerArtifactFromBuffer } from "../artifacts/index.js";
 import type Anthropic from "@anthropic-ai/sdk";
@@ -54,42 +55,6 @@ const botCreatedThreads = new Set<string>();
  */
 export function registerBotThread(threadId: string): void {
   botCreatedThreads.add(threadId);
-}
-
-// ---------------------------------------------------------------------------
-// Message splitting helper
-// ---------------------------------------------------------------------------
-
-const DISCORD_MAX_LENGTH = 2000;
-
-function splitMessage(text: string): string[] {
-  if (text.length <= DISCORD_MAX_LENGTH) return [text];
-
-  const chunks: string[] = [];
-  let remaining = text;
-
-  while (remaining.length > 0) {
-    if (remaining.length <= DISCORD_MAX_LENGTH) {
-      chunks.push(remaining);
-      break;
-    }
-
-    // Try to split at a newline boundary within the limit
-    let splitIndex = remaining.lastIndexOf("\n", DISCORD_MAX_LENGTH);
-    if (splitIndex <= 0) {
-      // Fall back to splitting at a space
-      splitIndex = remaining.lastIndexOf(" ", DISCORD_MAX_LENGTH);
-    }
-    if (splitIndex <= 0) {
-      // Hard split at the limit
-      splitIndex = DISCORD_MAX_LENGTH;
-    }
-
-    chunks.push(remaining.slice(0, splitIndex));
-    remaining = remaining.slice(splitIndex).trimStart();
-  }
-
-  return chunks;
 }
 
 // ---------------------------------------------------------------------------

@@ -24,7 +24,7 @@ import { initVoice, setVoiceDiscordClient, destroyVoice } from "./voice/index.js
 import { enableAutoJoin, disableAutoJoin, excludeFromAutoJoin } from "./voice/autoJoin.js";
 import { initVoiceCoach, setVoiceCoachClient, destroyVoiceCoach } from "./voice-coach/index.js";
 import { registerBotThread } from "./bot/messages.js";
-import { ensureThread } from "./shared/discord-utils.js";
+import { ensureThread, sendChunked } from "./shared/discord-utils.js";
 
 // Admin user ID for DM fallback delivery
 const ADMIN_USER_ID = "152801068663832576";
@@ -140,7 +140,7 @@ async function main(): Promise<void> {
       fullText.split("\n")[0].slice(0, 100) || "Cron notification",
       "cron",
     );
-    await target.send(fullText);
+    await sendChunked(target, fullText);
   });
 
   // Wire cron → admin DM fallback
@@ -165,7 +165,7 @@ async function main(): Promise<void> {
       text.split("\n")[0].slice(0, 100) || "Evolution update",
       "evolution",
     );
-    await target.send(text);
+    await sendChunked(target, text);
   });
 
   // Wire evolution → Discord thread creation (for deployment notifications)
@@ -182,7 +182,7 @@ async function main(): Promise<void> {
     });
     registerBotThread(thread.id);
     if (message) {
-      await thread.send(message);
+      await sendChunked(thread, message);
     }
   });
 
@@ -201,7 +201,7 @@ async function main(): Promise<void> {
         text.split("\n")[0].slice(0, 100) || "Reflection",
         "reflection",
       );
-      await target.send(text);
+      await sendChunked(target, text);
     });
   }
 
