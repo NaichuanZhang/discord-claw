@@ -14,7 +14,7 @@ import { processMessage } from "../agent/agent.js";
 import type { AgentResponse, AgentImage, ToolCallProgress } from "../agent/agent.js";
 import { resolveSession, getSessionHistory } from "../agent/sessions.js";
 import { getChannelConfig, addMessage } from "../db/index.js";
-import type { TokenUsage } from "../db/index.js";
+import type { Message as DbMessage, TokenUsage } from "../db/index.js";
 import { broadcastLog } from "../gateway/server.js";
 import { isRestarting } from "../restart.js";
 import {
@@ -813,6 +813,101 @@ function isMonitoredChannel(message: DiscordMessage): boolean {
 }
 
 // ---------------------------------------------------------------------------
+// Discord thread history fetching
+// ---------------------------------------------------------------------------
+
+/** Max messages to fetch from Discord thread history */
+const MAX_THREAD_HISTORY_MESSAGES = 50;
+
+/**
+ * Fetch message history from a Discord thread and convert to DbMessage format.
+ * This provides context when the DB session is new/empty but the thread
+ * already has conversation history.
+ *
+ * Excludes the current message (which will be sent separately).
+ * Returns messages in chronological order (oldest first).
+ */
+async function fetchDiscordThreadHistory(
+  thread: ThreadChannel,
+  currentMessageId: string,
+  sessionId: string,
+): Promise<DbMessage[]> {
+  try {
+    const botUserId = botClient?.user?.id;
+
+    // Fetch recent messages from the thread (Discord returns newest-first)
+    const discordMessages = await thread.messages.fetch({
+      limit: MAX_THREAD_HISTORY_MESSAGES,
+    });
+
+    if (discordMessages.size === 0) return [];
+
+    // Convert to array, filter out the current message, and sort chronologically
+    const sorted = Array.from(discordMessages.values())
+      .filter((msg) => msg.id !== currentMessageId)
+      .sort((a, b) => a.createdTimestamp - b.createdTimestamp);
+
+    if (sorted.length === 0) return [];
+
+    // Convert Discord messages to DbMessage format
+    const messages: DbMessage[] = [];
+    let idCounter = 0;
+
+    for (const msg of sorted) {
+      // Determine role: bot messages are "assistant", everything else is "user"
+      const isBot = msg.author.bot && msg.author.id === botUserId;
+      const role = isBot ? "assistant" : "user";
+
+      // Get message content — prefix user messages with the author name
+      // for multi-user threads so the agent knows who said what
+      let content = msg.content || "";
+
+      // Skip empty messages (e.g. embeds-only from the bot, system messages)
+      if (!content && msg.attachments.size === 0) continue;
+
+      // For user messages, prefix with author name
+      if (role === "user" && content) {
+        const authorName = msg.author.displayName ?? msg.author.username;
+        content = `${authorName}: ${content}`;
+      }
+
+      // Note attachments if present
+      if (msg.attachments.size > 0 && role === "user") {
+        const attachmentNames = msg.attachments.map((att) => att.name).filter(Boolean).join(", ");
+        if (attachmentNames) {
+          content = content
+            ? `${content}\n\n[Attachments: ${attachmentNames}]`
+            : `[Attachments: ${attachmentNames}]`;
+        }
+      }
+
+      if (!content) continue;
+
+      // Strip bot mentions from content (clean up for context)
+      if (botUserId) {
+        content = content.replace(new RegExp(`<@!?${botUserId}>`, "g"), "").trim();
+      }
+
+      if (!content) continue;
+
+      messages.push({
+        id: idCounter++,
+        sessionId,
+        role,
+        content,
+        discordMessageId: msg.id,
+        createdAt: msg.createdTimestamp,
+      });
+    }
+
+    return messages;
+  } catch (err) {
+    console.error("[bot] Failed to fetch Discord thread history:", err);
+    return [];
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Tool call progress → Discord message formatting
 // ---------------------------------------------------------------------------
 
@@ -1264,7 +1359,28 @@ export async function handleMessage(message: DiscordMessage): Promise<void> {
     return;
   }
 
-  const history = getSessionHistory(session.id);
+  // 8c. Get conversation history — prefer DB, fall back to Discord thread history
+  let history = getSessionHistory(session.id);
+
+  // If we're in a thread and the DB has no history for this session,
+  // fetch the thread's message history from Discord for context.
+  // This handles cases like: bot restart, session expiry, or user @mentions
+  // the bot in an existing thread for the first time.
+  if (isThread && history.length === 0) {
+    const thread = message.channel as ThreadChannel;
+    const discordHistory = await fetchDiscordThreadHistory(
+      thread,
+      message.id,
+      session.id,
+    );
+
+    if (discordHistory.length > 0) {
+      history = discordHistory;
+      console.log(
+        `[bot] Loaded ${discordHistory.length} message(s) from Discord thread history (thread ${thread.id})`,
+      );
+    }
+  }
 
   // Resolve context details
   const guildName = message.guild?.name;
