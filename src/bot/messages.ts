@@ -1359,14 +1359,13 @@ export async function handleMessage(message: DiscordMessage): Promise<void> {
     return;
   }
 
-  // 8c. Get conversation history — prefer DB, fall back to Discord thread history
-  let history = getSessionHistory(session.id);
+  // 8c. Get conversation history — always use Discord thread history for threads
+  let history: DbMessage[];
 
-  // If we're in a thread and the DB has no history for this session,
-  // fetch the thread's message history from Discord for context.
-  // This handles cases like: bot restart, session expiry, or user @mentions
-  // the bot in an existing thread for the first time.
-  if (isThread && history.length === 0) {
+  if (isThread) {
+    // Always fetch the thread's message history directly from Discord.
+    // The thread IS the conversation — this ensures we always have the full
+    // context regardless of DB session state (restarts, expiry, etc.).
     const thread = message.channel as ThreadChannel;
     const discordHistory = await fetchDiscordThreadHistory(
       thread,
@@ -1374,12 +1373,16 @@ export async function handleMessage(message: DiscordMessage): Promise<void> {
       session.id,
     );
 
+    history = discordHistory;
+
     if (discordHistory.length > 0) {
-      history = discordHistory;
       console.log(
         `[bot] Loaded ${discordHistory.length} message(s) from Discord thread history (thread ${thread.id})`,
       );
     }
+  } else {
+    // For DMs and non-thread channels, use the DB session history
+    history = getSessionHistory(session.id);
   }
 
   // Resolve context details
